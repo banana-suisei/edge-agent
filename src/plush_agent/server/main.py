@@ -16,5 +16,8 @@ def run_server(config: Config) -> None:
 
     app = create_app()
     app.state.approval_handler = handler
+    app.state.store = store
+    app.state.checkpointer = checkpointer
+    app.state.config = config
 
     uvicorn.run(app, host=config.server.host, port=config.server.port)

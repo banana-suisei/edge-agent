@@ -18,15 +18,41 @@ plush-agent --config my-config.yaml chat
 流程：
 1. 加载配置文件
 2. `build_agent(config)` 创建 agent（含 `HumanInTheLoopMiddleware`）
-3. 使用固定 `thread_id = "cli-session"` 维持对话上下文
-4. 循环读取用户输入，`_sanitize_surrogates()` 清理编码后，`agent.invoke(version="v2")` 获取回复
-5. 如果产生 interrupt → `_handle_cli_hitl()` 提示用户审批
-6. `_print_reply()` 从 `GraphOutput.value` 中提取最后一条 AI 消息
-7. 输入 `/quit` 或空行退出
+3. `load_session_summary(store)` 加载上次对话摘要（如有）
+4. 使用固定 `thread_id = "cli-session"` 维持对话上下文
+5. 循环读取用户输入，`_sanitize_surrogates()` 清理编码后，`agent.invoke(version="v2")` 获取回复
+6. 如果产生 interrupt → `_handle_cli_hitl()` 处理（含自动审批）
+7. `_print_reply()` 从 `GraphOutput.value` 中提取最后一条 AI 消息
+8. 输入 `/quit` 或 Ctrl+C/EOF 退出
+9. 退出前 `save_session_summary()` 保存对话摘要到 store
+
+### 会话记忆加载
+
+首条消息前，自动加载上次的对话摘要并注入：
+
+```python
+prev_summary = load_session_summary(store)
+if prev_summary and not all_messages:
+    enriched = f"[上一次对话摘要]\n{prev_summary}\n[当前消息]\n{user_input}"
+```
+
+后续消息不再注入摘要，仅包含用户原始输入。
+
+### 会话记忆保存
+
+退出时（`/quit`、Ctrl+C、EOF）自动保存：
+
+```python
+finally:
+    if all_messages:
+        save_session_summary(store, all_messages, config)
+```
+
+摘要写入固定位置 `("sessions",) / "latest"`。
 
 ### HITL 交互审批
 
-CLI 模式下 `HumanInTheLoopMiddleware` 同样生效。当 agent 调用工具时：
+CLI 模式下 `HumanInTheLoopMiddleware` 同样生效。`_handle_cli_hitl()` 先检查自动审批规则，匹配则直接通过，不匹配才弹交互提示：
 
 ```
 ⚠ Tool call requires approval:
@@ -36,13 +62,9 @@ CLI 模式下 `HumanInTheLoopMiddleware` 同样生效。当 agent 调用工具�
   Rejection reason: 不要删除文件
 ```
 
-审批流程：
-1. `agent.invoke(version="v2")` 返回 `GraphOutput`
-2. `_handle_cli_hitl()` 检查 `result.interrupts`
-3. 遍历 `action_requests`，展示工具名和参数
-4. 用户选择 `y`（approve）或 `r`（reject + 原因）
-5. `agent.invoke(Command(resume={decisions}), version="v2")` 恢复执行
-6. 循环直到无新 interrupt
+自动审批通过 `_should_auto_approve(config, tool_name, tool_args)` 实现，与 HTTP 模式的 `ApprovalHandler.should_auto_approve()` 共享相同的正则匹配逻辑和 `config.yaml` 规则。
+
+记忆工具（save_memory / search_memory / get_memory / delete_memory）已配置 `auto_approve: .*`，在 CLI 下自动通过，无需人工确认。
 
 ### WSL2 编码处理
 
@@ -54,8 +76,6 @@ def _sanitize_surrogates(text: str) -> str:
 ```
 
 在用户输入传入 agent 前调用，对正常文本无影响。
-
-**注意**：CLI 模式同样支持 HITL 审批（通过 `_handle_cli_hitl()` 交互式审批），与 Server 模式共享 `HumanInTheLoopMiddleware`。auto_approve 规则对 CLI 同样生效。
 
 ### plush-agent serve
 
@@ -71,7 +91,7 @@ plush-agent --config prod.yaml serve
 1. 加载配置文件
 2. `build_agent(config)` 创建 agent
 3. 创建 `ApprovalHandler(agent, config)`
-4. 创建 FastAPI 应用，设置 `app.state.approval_handler`
+4. 创建 FastAPI 应用，设置 `app.state`（approval_handler、store、checkpointer、config）
 5. `uvicorn.run()` 启动服务
 
 ### --config 选项
@@ -95,3 +115,5 @@ plush-agent serve --help
 | API key 错误 | 环境变量是否设置（`echo $OPENAI_API_KEY`） |
 | 配置文件找不到 | 使用 `--config` 指定绝对路径 |
 | `UnicodeEncodeError: surrogates not allowed` | WSL2 中文输入编码问题，`_sanitize_surrogates()` 已处理 |
+| 记忆工具仍需手动审批 | 检查 `config.yaml` 中 `hitl.auto_approve` 是否包含记忆工具 |
+| 上次对话摘要未加载 | 检查 store 中 `("sessions",) / "latest"` 是否有数据 |

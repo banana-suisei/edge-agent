@@ -6,14 +6,14 @@
 - `src/plush_agent/hitl/approval_handler.py` — `ApprovalHandler` + `PendingApproval`
 - `src/plush_agent/server/routes_approval.py` — HTTP 审批接口
 - `src/plush_agent/server/routes_chat.py` — 通过 ApprovalHandler 调用 agent
-- `src/plush_agent/cli.py` — CLI 模式 HITL 交互审批
+- `src/plush_agent/cli.py` — CLI 模式 HITL 交互审批（含 `_should_auto_approve`）
 
 ## 架构
 
 HITL 分两层：
 
 1. **LangChain 官方层**：`HumanInTheLoopMiddleware` — 负责中断/恢复生命周期
-2. **Plush-Agent 层**：`ApprovalHandler` — 负责自动审批过滤 + HTTP/CLI 桥接
+2. **Plush-Agent 层**：`ApprovalHandler`（HTTP）+ `_should_auto_approve`（CLI） — 负责自动审批过滤
 
 ```
               ┌──────────────────────────────────┐
@@ -29,12 +29,11 @@ HITL 分两层：
                              ▼
               ┌──────────────────────────────────┐
               │    Plush-Agent 层                 │
-              │  ApprovalHandler                  │
-              │  - _process_interrupt() 解析中断   │
-              │  - should_auto_approve() 正则匹配  │
-              │  - run_with_hitl() 处理 interrupt  │
-              │  - submit_decision() HTTP 决策入口 │
-              │  - _extract_done() 统一返回格式   │
+              │  ApprovalHandler (HTTP)           │
+              │  _should_auto_approve (CLI)       │
+              │  - 正则匹配 auto_approve 规则     │
+              │  - 匹配 → 自动 approve            │
+              │  - 不匹配 → 人工审批              │
               └──────────────┬───────────────────┘
                              │
                     ┌────────┴────────┐
@@ -141,17 +140,21 @@ LangChain 官方 `ActionRequest` TypedDict 的 key 是 `args`（不是 `argument
 
 ## CLI 模式 HITL
 
-CLI 模式通过 `_handle_cli_hitl()` 实现交互式审批：
+CLI 模式通过 `_handle_cli_hitl()` 实现交互式审批，使用 `_should_auto_approve()` 匹配自动审批规则：
 
 ```python
-while result.interrupts:
-    # 展示每个 tool call 的 name 和 args
-    # 提示用户: Approve? [y/r(eject)]
-    # 收集 decisions
-    # agent.invoke(Command(resume={decisions}), cfg, version="v2")
+def _handle_cli_hitl(agent, result, cfg, config: Config):
+    while result.interrupts:
+        for action in action_requests:
+            if _should_auto_approve(config, name, args):
+                decisions.append({"type": "approve"})
+                continue
+            # 否则交互式审批
+            click.echo(f"\n⚠ Tool call requires approval:")
+            ...
 ```
 
-CLI 使用 `version="v2"` 获取 `GraphOutput`，循环处理直到无中断。
+`_should_auto_approve()` 与 `ApprovalHandler.should_auto_approve()` 逻辑一致，共享 `config.yaml` 中的 `hitl.auto_approve` 规则。
 
 ## PendingApproval 数据模型
 
@@ -171,7 +174,7 @@ class PendingApproval:
 
 ## 自动审批规则
 
-配置在 `config.yaml` 的 `hitl.auto_approve` 中：
+配置在 `config.yaml` 的 `hitl.auto_approve` 中，CLI 和 HTTP 共享：
 
 ```python
 def should_auto_approve(self, tool_name: str, tool_args: dict) -> bool:
@@ -189,6 +192,8 @@ def should_auto_approve(self, tool_name: str, tool_args: dict) -> bool:
 - 工具名必须完全匹配 `rule.tool`
 - 参数匹配是对 `str(tool_args)` 做正则搜索
 - 任一 pattern 匹配即通过
+
+当前自动审批的工具：`terminal`（部分命令）、`form_generate`、`load_skill`、`save_memory`、`search_memory`、`get_memory`、`delete_memory`。
 
 ## HTTP 接口
 
@@ -229,6 +234,7 @@ Body: {
 4. **所有 decision 必须一次性提交**——官方 middleware 不支持部分恢复
 5. **`interrupt_on` 必须覆盖所有工具**——未配置的工具会被自动放行，存在安全风险
 6. **ActionRequest key 是 `args`**——不是 `arguments`，由 LangChain 官方 TypedDict 定义
+7. **CLI 和 HTTP 共享 auto_approve 规则**——通过 `config.yaml` 统一配置
 
 ## 扩展指南
 
@@ -273,7 +279,8 @@ return result  # 始终是结构化 dict，直接返回
 | 问题 | 定位 |
 |------|------|
 | 工具总被审批 | 检查 `interrupt_on` 配置和 `auto_approve` 规则 |
-| 自动审批不生效 | `should_auto_approve()` — 检查 tool name 和 args 正则 |
+| 自动审批不生效（CLI） | `cli.py` 的 `_should_auto_approve()` — 检查 tool name 和 args 正则 |
+| 自动审批不生效（HTTP） | `ApprovalHandler.should_auto_approve()` — 同上 |
 | interrupt 后无法恢复 | 确认 thread_id 一致、checkpointer 已配置 |
 | 多个审批只处理了一个 | `decisions` 数组长度必须匹配所有 action_requests |
 | `result.interrupts` 为空 | 确认使用 `version="v2"` 调用 `agent.ainvoke()` |

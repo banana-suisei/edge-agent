@@ -4,13 +4,16 @@
 
 - `src/plush_agent/tools/bash.py` — Bash/Shell 工具
 - `src/plush_agent/tools/form.py` — 表单生成工具 + HTTP 接口函数
+- `src/plush_agent/tools/memory.py` — 长期记忆工具 + 会话摘要函数
 
 ## 工具注册
 
 在 `agent.py` 的 `_collect_tools()` 中统一收集，传入 `create_agent(tools=...)`：
 
 ```python
-tools = [bash_tool, load_skill, create_form_generate_tool(config)]
+from plush_agent.tools.memory import memory_tools
+
+tools = [bash_tool, load_skill, create_form_generate_tool(config), *memory_tools]
 # + MCP tools (async loaded)
 ```
 
@@ -121,52 +124,39 @@ _form_events: dict[str, asyncio.Event] = {}  # form_id → Event
 
 `submit_form()` 设置 `entry["submitted"] = fields` 并调用 `event.set()`，唤醒正在等待的 tool。
 
-## Memory Tools (*) 待实现
+---
 
-长期记忆工具，通过 `runtime.store` 读写 PostgresStore。这是数据写入 PostgreSQL 的唯一入口。
+## Memory Tools
 
-计划实现在 `src/plush_agent/tools/memory.py`：
+长期记忆工具，通过 `runtime.store` 读写 PostgresStore。这是 Agent 运行时写入长期记忆的唯一入口。
 
-| 工具 | 功能 | store 操作 |
-|------|------|-----------|
-| `save_memory` | 保存一条记忆到指定 namespace | `store.put(namespace, key, value)` |
-| `search_memory` | 搜索指定 namespace 中的记忆 | `store.search(namespace, query=...)` |
-| `get_memory` | 按 key 获取指定记忆 | `store.get(namespace, key)` |
-| `delete_memory` | 按 key 删除记忆 | `store.delete(namespace, key)` |
+| 工具 | 功能 | store 操作 | HITL 审批 |
+|------|------|-----------|----------|
+| `save_memory` | 保存记忆（key 为英文关键词） | `store.put(namespace, key, {"content": value})` | 自动通过 |
+| `search_memory` | 搜索记忆（query 为英文关键词） | `store.search(namespace, query=query)` | 自动通过 |
+| `get_memory` | 按 key 精确获取 | `store.get(namespace, key)` | 自动通过 |
+| `delete_memory` | 按 key 精确删除 | `store.delete(namespace, key)` | 自动通过 |
 
-工具签名示例：
+### 关键词设计
+
+`key` 和 `query` 参数均使用英文关键词以提高跨语言召回率：
 
 ```python
-from langchain.tools import tool, ToolRuntime
+# 保存时
+save_memory(namespace="users/default", key="python,data-analysis,preference", value="用户喜欢用Python做数据分析")
 
-@tool
-def save_memory(
-    namespace: str,       # namespace 路径，如 "preferences" 或 "users/user_123"
-    key: str,             # 记忆条目的唯一标识
-    content: str,         # 要保存的内容
-    runtime: ToolRuntime,
-) -> str:
-    """Save a piece of information to long-term memory for later recall."""
-    assert runtime.store is not None
-    ns = tuple(namespace.split("/"))
-    runtime.store.put(ns, key, {"content": content})
-    return f"Saved memory '{key}' under '{namespace}'"
+# 搜索时
+search_memory(namespace="users/default", query="programming data analysis")
 ```
 
-注册后在 `config.yaml` 中添加自动审批规则：
+### 会话摘要函数（非 @tool）
 
-```yaml
-hitl:
-  auto_approve:
-    - tool: "save_memory"
-      args_patterns: [".*"]
-    - tool: "search_memory"
-      args_patterns: [".*"]
-    - tool: "get_memory"
-      args_patterns: [".*"]
-    - tool: "delete_memory"
-      args_patterns: [".*"]
-```
+`memory.py` 还提供两个应用层函数，由 CLI/Server 直接调用：
+
+- `save_session_summary(store, messages, config)` — 生成对话摘要，写入 `("sessions",) / "latest"`
+- `load_session_summary(store)` — 读取上次摘要
+
+详见 [memory.md](memory.md)。
 
 ---
 
@@ -188,3 +178,4 @@ hitl:
 | LLM 返回非 JSON | `_generate_form_sync()` 的 markdown fence 剥离逻辑 |
 | 表单提交后 tool 无响应 | `submit_form()` 是否正确调用 `event.set()` |
 | 表单超时 | 检查 `timeout` 参数和 `config.form.default_timeout` |
+| 记忆搜索无结果 | key/query 是否使用英文关键词 |

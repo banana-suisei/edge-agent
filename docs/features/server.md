@@ -4,7 +4,7 @@
 
 - `src/plush_agent/server/app.py` — FastAPI 应用工厂
 - `src/plush_agent/server/main.py` — uvicorn 启动入口
-- `src/plush_agent/server/routes_chat.py` — `/api/chat`
+- `src/plush_agent/server/routes_chat.py` — `/api/chat`, `/api/chat/end`
 - `src/plush_agent/server/routes_form.py` — `/api/forms`
 - `src/plush_agent/server/routes_approval.py` — `/api/approvals`
 
@@ -18,16 +18,27 @@ plush-agent serve
       → ApprovalHandler(agent, config)
       → create_app() → FastAPI 实例
       → app.state.approval_handler = handler
+      → app.state.store = store
+      → app.state.checkpointer = checkpointer
+      → app.state.config = config
       → uvicorn.run(app, host, port)
 ```
 
-`app.state.approval_handler` 是全局共享的 ApprovalHandler 实例，各路由通过 `request.app.state.approval_handler` 访问。
+`app.state` 上的共享对象：
+
+| 属性 | 类型 | 用途 |
+|------|------|------|
+| `approval_handler` | `ApprovalHandler` | HITL 审批处理 |
+| `store` | `BaseStore` | 长期记忆读写 |
+| `checkpointer` | `InMemorySaver` | 获取对话历史（会话摘要） |
+| `config` | `Config` | LLM 配置（摘要生成） |
 
 ## 路由总览
 
 | 方法 | 路径 | 处理文件 | 功能 |
 |------|------|----------|------|
 | POST | `/api/chat` | `routes_chat.py` | 发送消息给 Agent |
+| POST | `/api/chat/end` | `routes_chat.py` | 结束会话并保存摘要 |
 | GET | `/api/forms` | `routes_form.py` | 列出待填写表单 |
 | GET | `/api/forms/{form_id}` | `routes_form.py` | 获取表单详情 |
 | POST | `/api/forms/{form_id}/submit` | `routes_form.py` | 提交表单数据 |
@@ -39,21 +50,30 @@ FastAPI 自动生成 `/docs`（Swagger UI）和 `/redoc`（ReDoc）文档。
 
 ## 聊天接口详解
 
-### 请求
+### POST /api/chat
 
-```
-POST /api/chat
-Content-Type: application/json
+**请求：**
 
+```json
 {
   "message": "帮我生成一个用户注册表单",
   "thread_id": "optional-thread-id"
 }
 ```
 
-### 响应
+**新 thread 摘要注入：**
 
-**正常完成：**
+当 `checkpointer.get_tuple(cfg)` 返回 `None`（新 thread）时，自动加载上次会话摘要并注入到消息中：
+
+```python
+prev_summary = load_session_summary(store)
+if prev_summary:
+    message = f"[上一次对话摘要]\n{prev_summary}\n[当前消息]\n{message}"
+```
+
+**响应：**
+
+正常完成：
 
 ```json
 {
@@ -62,7 +82,7 @@ Content-Type: application/json
 }
 ```
 
-**需要审批：**
+需要审批：
 
 ```json
 {
@@ -80,13 +100,38 @@ Content-Type: application/json
 }
 ```
 
-### 流程
+### POST /api/chat/end
 
-1. 从 `request.app.state` 获取 `ApprovalHandler`
-2. `thread_id` 默认为 `"default"`
-3. `_sanitize_surrogates()` 清理请求消息中的代理字符
-4. 调用 `handler.run_with_hitl(message, thread_id)`
-5. 直接返回 handler 结果（始终是结构化 dict）
+结束会话，生成对话摘要并保存到长期记忆。
+
+**请求：**
+
+```json
+{
+  "thread_id": "my-thread-id"
+}
+```
+
+**响应：**
+
+```json
+{
+  "status": "saved",
+  "summary": "- 用户询问了Python数据分析方案\n- 推荐使用pandas..."
+}
+```
+
+无对话或无消息时返回：
+
+```json
+{"status": "no_conversation", "message": "No conversation found for this thread."}
+```
+
+流程：
+1. 从 `checkpointer.get_tuple()` 获取对话历史
+2. 提取 messages
+3. 调用 `save_session_summary(store, messages, config)`
+4. 返回摘要内容
 
 ## 启动参数
 
@@ -106,3 +151,5 @@ plush-agent --config prod.yaml serve     # 指定配置文件
 | 500 | 查看 uvicorn 日志输出 |
 | chat 返回空回复 | `routes_chat.py` 中提取 AI message 的逻辑 |
 | `UnicodeEncodeError: surrogates not allowed` | `routes_chat.py` 中 `_sanitize_surrogates()` 清理输入 |
+| 摘要未注入 | 检查 checkpointer 返回值和 store 中 "latest" 数据 |
+| /chat/end 返回 no_conversation | thread_id 是否正确，对话是否已发生 |
