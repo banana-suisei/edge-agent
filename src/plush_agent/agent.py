@@ -4,9 +4,9 @@ from langchain.agents import create_agent
 from langchain.agents.middleware import HumanInTheLoopMiddleware
 from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.memory import InMemorySaver
-from langgraph.store.memory import InMemoryStore
 
 from plush_agent.config import Config
+from plush_agent.memory.store import create_store
 from plush_agent.skills.loader import SkillLoader
 from plush_agent.skills.middleware import SkillMiddleware
 
@@ -36,7 +36,7 @@ def build_agent(config: Config):
         description_prefix="Tool execution pending approval",
     )
 
-    store = InMemoryStore()
+    store = create_store(config.memory)
     checkpointer = InMemorySaver()
 
     agent = create_agent(

@@ -37,8 +37,8 @@ Plush-Agent 是一个基于 LangChain 的 ReAct Agent，使用 OpenAI 接口标�
 ┌──────────────┐  ┌──────────────┐  ┌──────────────────────┐
 │   Tools 层    │  │  记忆层      │  │  Skills 层           │
 │              │  │             │  │                      │
-│ ┌──────────┐ │  │ InMemoryStore│  │ .skill/              │
-│ │ terminal │ │  │             │  │ └── <name>/           │
+│ ┌──────────┐ │  │ PostgresStore│  │ .skill/              │
+│ │ terminal │ │  │ (PostgreSQL) │  │ └── <name>/           │
 │ │ (Bash)   │ │  │ namespace/  │  │     ├── SKILL.md     │
 │ ├──────────┤ │  │ key → JSON  │  │     ├── scripts/     │
 │ │form_     │ │  │             │  │     └── references/  │
@@ -46,11 +46,17 @@ Plush-Agent 是一个基于 LangChain 的 ReAct Agent，使用 OpenAI 接口标�
 │ ├──────────┤ │                    │  SkillLoader (扫描)  │
 │ │load_skill│ │  ┌──────────────┐  │  SkillMiddleware     │
 │ ├──────────┤ │  │  MCP 层      │  │  (渐进式披露)        │
-│ │MCP tools │ │  │             │  └──────────────────────┘
-│ │(动态加载)│ │  │ MultiServer │
-│ └──────────┘ │  │ MCPClient   │
-└──────────────┘  │ (from JSON) │
-                  └──────────────┘
+│ │memory_   │ │  │             │  └──────────────────────┘
+│ │tools (*) │ │  │ MultiServer │
+│ │(待实现)  │ │  │ MCPClient   │
+│ ├──────────┤ │  │ (from JSON) │
+│ │MCP tools │ │  └──────────────┘
+│ │(动态加载)│ │
+│ └──────────┘ │
+└──────────────┘
+
+(*) memory_tools 待实现：save_memory / search_memory / list_memories
+    通过 runtime.store 读写 PostgresStore，是长期记忆数据写入的唯一入口
 ```
 
 ## 目录结构
@@ -75,11 +81,12 @@ plush-agent/
 │   │   └── middleware.py             # SkillMiddleware + load_skill tool
 │   ├── tools/
 │   │   ├── bash.py                   # ShellTool 封装
-│   │   └── form.py                   # 表单生成 tool + HTTP 接口
+│   │   ├── form.py                   # 表单生成 tool + HTTP 接口
+│   │   └── memory.py                 # (*) 长期记忆工具 (待实现)
 │   ├── mcp/
 │   │   └── loader.py                 # MCP 从 JSON 配置加载
 │   ├── memory/
-│   │   └── store.py                  # InMemoryStore 工厂
+│   │   └── store.py                  # Store 工厂 (PostgresStore / InMemoryStore)
 │   ├── hitl/
 │   │   └── approval_handler.py       # HITL 自动审批 + HTTP 桥接
 │   └── server/
@@ -110,7 +117,38 @@ plush-agent/
          → 需要人工 → 返回 pending_approval 等待 HTTP 决策
 ```
 
-### 2. 表单工具流
+### 2. 长期记忆流 (当前状态)
+
+```
+                    ┌─────────────────────────────────────────┐
+                    │           当前状态（缺陷）                │
+                    │                                         │
+  create_agent()    │  store=store  ✅ 已传入                   │
+  ──────────────►   │  PostgresStore ✅ 已创建并 setup()        │
+                    │                                         │
+                    │  ❌ 没有任何工具调用 runtime.store         │
+                    │  ❌ 数据永远不会写入 PostgreSQL            │
+                    │                                         │
+                    │  根因：缺少 memory_tools                  │
+                    │  (save_memory / search_memory 等)        │
+                    └─────────────────────────────────────────┘
+
+修复后的预期数据流：
+
+Agent 对话
+  → LLM 判断需要记忆信息
+  → 调用 save_memory(namespace, key, value)
+    → runtime.store.put(namespace, key, value)
+    → 写入 PostgresStore → PostgreSQL
+
+Agent 对话
+  → LLM 判断需要回忆信息
+  → 调用 search_memory(namespace, query)
+    → runtime.store.search(namespace, query)
+    → 从 PostgresStore 读取 → 返回给 Agent
+```
+
+### 3. 表单工具流
 
 ```
 Agent 调用 form_generate(purpose, requirements, timeout)
@@ -123,7 +161,7 @@ Agent 调用 form_generate(purpose, requirements, timeout)
 超时 → tool 返回 timeout 状态
 ```
 
-### 3. HITL 审批流
+### 4. HITL 审批流
 
 ```
 ApprovalHandler.run_with_hitl(message, thread_id)
@@ -161,7 +199,7 @@ server/main.py → agent.py
 
 agent.py → config.py
          → skills/loader.py + skills/middleware.py
-         → tools/bash.py + tools/form.py
+         → tools/bash.py + tools/form.py + tools/memory.py (*)
          → mcp/loader.py
          → memory/store.py
 
@@ -181,5 +219,16 @@ server/routes_*.py → hitl/approval_handler.py
 | 自动审批 | HTTP 层实现，不修改 middleware | 官方 middleware 仅支持工具名级别，参数正则需要在调用层处理 |
 | Skills 格式 | agentskills.io 规范 | 开放标准，SKILL.md 可读、可审计、易分享 |
 | 表单等待 | `asyncio.Event` + 内存 store | 简单可靠，单进程部署足够 |
-| 配置格式 | YAML | 人类可读，支持注释，适合手动编辑 |
+| 长期记忆存储 | PostgreSQL (PostgresStore) | 生产级持久化，跨进程共享，支持向量搜索 |
+| 记忆访问方式 | 通过 `runtime.store` 在 tool 中读写 | LangChain 官方模式：store 传入 create_agent 后，tool 通过 ToolRuntime.store 访问 |
 | MCP 加载 | JSON 文件 | MCP 的 MultiServerMCPClient 接受 dict，JSON 映射最直接 |
+
+## 已知问题
+
+### 长期记忆未写入数据
+
+**现象**：PostgreSQL 中 `store` 表存在但无任何数据行。
+
+**根因**：`store` 虽然已正确创建（PostgresStore + ConnectionPool）并传入 `create_agent(store=store)`，但没有任何工具通过 `runtime.store` 执行 put/get/search 操作。LLM 无法自主决定写入记忆——它需要显式的工具（如 `save_memory`、`search_memory`）才能与 store 交互。
+
+**修复方案**：在 `src/plush_agent/tools/memory.py` 中实现记忆工具，并在 `_collect_tools()` 中注册。

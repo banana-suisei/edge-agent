@@ -15,7 +15,7 @@
 | `model` | `ModelConfig` | LLM 连接参数 |
 | `agent` | `AgentConfig` | Agent 行为参数 |
 | `mcp` | `McpConfig` | MCP 配置文件路径 |
-| `memory` | `MemoryConfig` | 记忆后端类型 |
+| `memory` | `MemoryConfig` | 记忆后端类型 + PostgreSQL 连接参数 |
 | `server` | `ServerConfig` | HTTP 服务参数 |
 | `hitl` | `HitlConfig` | 自动审批规则列表 |
 | `form` | `FormConfig` | 表单工具超时 |
@@ -42,6 +42,24 @@ agent:
   skills_dir: ".skill"          # skills 目录的相对/绝对路径
   max_iterations: 10            # ReAct 最大迭代次数
 ```
+
+## MemoryConfig
+
+```yaml
+memory:
+  type: "postgres"       # "postgres" 或 "in_memory"
+  postgres:
+    host: "localhost"        # PostgreSQL 主机
+    port: 5432               # 端口
+    user: "postgres"         # 用户名
+    password: "postgres"     # 密码（支持特殊字符，自动 URL 编码）
+    database: "plush_agent"  # 数据库名
+    sslmode: "disable"       # SSL 模式：disable / prefer / require
+```
+
+`PostgresConfig.connection_string` 属性自动拼接为 PostgreSQL 连接串，user/password 通过 `urllib.parse.quote_plus` 编码以处理特殊字符（如 `@`、`:`）。
+
+当 `type` 为 `"in_memory"` 时忽略 `postgres` 配置，使用 `InMemoryStore`。
 
 ## HitlConfig
 

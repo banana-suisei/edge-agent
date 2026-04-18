@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import quote_plus
 
 import yaml
 
@@ -33,8 +34,25 @@ class McpConfig:
 
 
 @dataclass
+class PostgresConfig:
+    host: str = "localhost"
+    port: int = 5432
+    user: str = "postgres"
+    password: str = "postgres"
+    database: str = "plush_agent"
+    sslmode: str = "prefer"
+
+    @property
+    def connection_string(self) -> str:
+        user = quote_plus(self.user)
+        password = quote_plus(self.password)
+        return f"postgresql://{user}:{password}@{self.host}:{self.port}/{self.database}?sslmode={self.sslmode}"
+
+
+@dataclass
 class MemoryConfig:
-    type: str = "in_memory"
+    type: str = "postgres"
+    postgres: PostgresConfig = field(default_factory=PostgresConfig)
 
 
 @dataclass
@@ -98,7 +116,18 @@ def load_config(path: str | Path) -> Config:
         cfg.mcp = McpConfig(config_file=raw["mcp"].get("config_file", cfg.mcp.config_file))
 
     if "memory" in raw:
-        cfg.memory = MemoryConfig(type=raw["memory"].get("type", cfg.memory.type))
+        mem = raw["memory"]
+        cfg.memory = MemoryConfig(type=mem.get("type", cfg.memory.type))
+        if "postgres" in mem:
+            p = mem["postgres"]
+            cfg.memory.postgres = PostgresConfig(
+                host=p.get("host", "localhost"),
+                port=p.get("port", 5432),
+                user=p.get("user", "postgres"),
+                password=p.get("password", "postgres"),
+                database=p.get("database", "plush_agent"),
+                sslmode=p.get("sslmode", "prefer"),
+            )
 
     if "server" in raw:
         s = raw["server"]

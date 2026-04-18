@@ -121,6 +121,55 @@ _form_events: dict[str, asyncio.Event] = {}  # form_id → Event
 
 `submit_form()` 设置 `entry["submitted"] = fields` 并调用 `event.set()`，唤醒正在等待的 tool。
 
+## Memory Tools (*) 待实现
+
+长期记忆工具，通过 `runtime.store` 读写 PostgresStore。这是数据写入 PostgreSQL 的唯一入口。
+
+计划实现在 `src/plush_agent/tools/memory.py`：
+
+| 工具 | 功能 | store 操作 |
+|------|------|-----------|
+| `save_memory` | 保存一条记忆到指定 namespace | `store.put(namespace, key, value)` |
+| `search_memory` | 搜索指定 namespace 中的记忆 | `store.search(namespace, query=...)` |
+| `get_memory` | 按 key 获取指定记忆 | `store.get(namespace, key)` |
+| `delete_memory` | 按 key 删除记忆 | `store.delete(namespace, key)` |
+
+工具签名示例：
+
+```python
+from langchain.tools import tool, ToolRuntime
+
+@tool
+def save_memory(
+    namespace: str,       # namespace 路径，如 "preferences" 或 "users/user_123"
+    key: str,             # 记忆条目的唯一标识
+    content: str,         # 要保存的内容
+    runtime: ToolRuntime,
+) -> str:
+    """Save a piece of information to long-term memory for later recall."""
+    assert runtime.store is not None
+    ns = tuple(namespace.split("/"))
+    runtime.store.put(ns, key, {"content": content})
+    return f"Saved memory '{key}' under '{namespace}'"
+```
+
+注册后在 `config.yaml` 中添加自动审批规则：
+
+```yaml
+hitl:
+  auto_approve:
+    - tool: "save_memory"
+      args_patterns: [".*"]
+    - tool: "search_memory"
+      args_patterns: [".*"]
+    - tool: "get_memory"
+      args_patterns: [".*"]
+    - tool: "delete_memory"
+      args_patterns: [".*"]
+```
+
+---
+
 ## 扩展指南
 
 添加新 tool：
