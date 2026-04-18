@@ -1,0 +1,28 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "plush-agent"
+version = "0.1.0"
+description = "LangChain ReAct Agent with OpenAI-compatible model, skills, tools, MCP, and HITL"
+requires-python = ">=3.11"
+dependencies = [
+    "langchain>=0.1.0",
+    "langchain-openai",
+    "langchain-community",
+    "langgraph",
+    "langchain-mcp-adapters",
+    "langchain-experimental",
+    "fastapi",
+    "uvicorn[standard]",
+    "click",
+    "pyyaml",
+    "sse-starlette",
+]
+
+[project.scripts]
+plush-agent = "plush_agent.cli:cli"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/plush_agent"]
