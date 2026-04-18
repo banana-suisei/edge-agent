@@ -2,16 +2,18 @@
 
 ## 文件
 
+- `src/plush_agent/agent.py` — `build_agent()` 配置 `HumanInTheLoopMiddleware`
 - `src/plush_agent/hitl/approval_handler.py` — `ApprovalHandler` + `PendingApproval`
 - `src/plush_agent/server/routes_approval.py` — HTTP 审批接口
 - `src/plush_agent/server/routes_chat.py` — 通过 ApprovalHandler 调用 agent
+- `src/plush_agent/cli.py` — CLI 模式 HITL 交互审批
 
 ## 架构
 
 HITL 分两层：
 
 1. **LangChain 官方层**：`HumanInTheLoopMiddleware` — 负责中断/恢复生命周期
-2. **Plush-Agent 层**：`ApprovalHandler` — 负责自动审批过滤 + HTTP 桥接
+2. **Plush-Agent 层**：`ApprovalHandler` — 负责自动审批过滤 + HTTP/CLI 桥接
 
 ```
               ┌──────────────────────────────────┐
@@ -20,24 +22,46 @@ HITL 分两层：
               │  - after_model hook 拦截 tool_calls│
               │  - interrupt() 暂停执行           │
               │  - Command(resume=decisions) 恢复 │
+              │  - interrupt_on={tool: True}      │
+              │    所有工具默认拦截，安全优先       │
               └──────────────┬───────────────────┘
                              │
                              ▼
               ┌──────────────────────────────────┐
               │    Plush-Agent 层                 │
               │  ApprovalHandler                  │
+              │  - _process_interrupt() 解析中断   │
               │  - should_auto_approve() 正则匹配  │
               │  - run_with_hitl() 处理 interrupt  │
               │  - submit_decision() HTTP 决策入口 │
+              │  - _extract_done() 统一返回格式   │
               └──────────────┬───────────────────┘
                              │
-                             ▼
-              ┌──────────────────────────────────┐
-              │    HTTP 层                        │
-              │  /api/approvals                   │
-              │  /api/approvals/{id}/decide       │
-              └──────────────────────────────────┘
+                    ┌────────┴────────┐
+                    ▼                 ▼
+              ┌───────────┐   ┌──────────────┐
+              │  HTTP 层   │   │   CLI 层      │
+              │  /api/     │   │ _handle_cli_  │
+              │  approvals │   │ hitl()        │
+              └───────────┘   └──────────────┘
 ```
+
+## Middleware 注册
+
+在 `agent.py` 的 `build_agent()` 中，所有已知工具名被收集后注册到 `interrupt_on`：
+
+```python
+all_tool_names = {t.name for t in tools}
+all_tool_names.add("load_skill")  # 来自 SkillMiddleware
+interrupt_on = {name: True for name in all_tool_names}
+
+hitl_middleware = HumanInTheLoopMiddleware(
+    interrupt_on=interrupt_on,
+    description_prefix="Tool execution pending approval",
+)
+```
+
+**安全模型：默认拦截所有工具调用**。未列在 `interrupt_on` 中的工具会被 `HumanInTheLoopMiddleware` 自动放行，因此新增工具时必须同步更新 `interrupt_on`。
 
 ## 完整生命周期
 
@@ -52,26 +76,82 @@ Step 2: agent.ainvoke({messages}, config={thread_id}, version="v2")
           → 匹配 → interrupt() → 返回 GraphOutput.interrupts
           → 不匹配 → 直接执行 tool
 
-Step 3: ApprovalHandler 处理 interrupt
+Step 3: ApprovalHandler._process_interrupt() 解析 interrupt.value
+        → action_requests: [{name, args, description}, ...]
+        → review_configs: [{action_name, allowed_decisions}, ...]
         → 遍历 action_requests
-        → should_auto_approve(name, arguments)?
+        → should_auto_approve(name, args)?
           → Yes → decisions[i] = {"type": "approve"}
           → No  → decisions[i] = None, 加入 needs_human
+        → 从 review_configs 提取每个 action 的 allowed_decisions
 
 Step 4a: 全部自动审批
         → agent.ainvoke(Command(resume={decisions}), config, version="v2")
-        → 返回最终结果
+        → _extract_done() → {"status": "done", "content": reply}
 
 Step 4b: 部分需要人工
         → 存入 self.pending[thread_id] = PendingApproval(...)
-        → HTTP 返回 {"status": "pending_approval", "pending_actions": [...]}
+        → 返回 {"status": "pending_approval", "pending_actions": [...]}
 
 Step 5: 用户 POST /api/approvals/{id}/decide {decisions: [...]}
         → ApprovalHandler.submit_decision()
         → 将 human_decisions 填入 decisions 数组对应位置
         → agent.ainvoke(Command(resume={all_decisions}), config, version="v2")
-        → 返回最终结果
+        → 可能产生新的 interrupt → _process_interrupt() 再次处理
+        → 无新 interrupt → _extract_done() 返回结果
 ```
+
+## Interrupt 数据结构
+
+LangChain 官方 `ActionRequest` TypedDict 的 key 是 `args`（不是 `arguments`）：
+
+```python
+# interrupt.value 结构
+{
+    "action_requests": [
+        {
+            "name": "terminal",           # 工具名
+            "args": {"commands": "ls"},    # 注意: key 是 "args"
+            "description": "Tool execution pending approval\n\nTool: terminal\nArgs: ..."
+        }
+    ],
+    "review_configs": [
+        {
+            "action_name": "terminal",
+            "allowed_decisions": ["approve", "edit", "reject"]
+        }
+    ]
+}
+```
+
+`allowed_decisions` 位于 `review_configs` 中，而非 `action_requests` 中。`_process_interrupt()` 负责从 `review_configs` 中提取每个 action 对应的 `allowed_decisions`。
+
+## 返回值约定
+
+`ApprovalHandler` 的所有公开方法始终返回结构化 dict：
+
+| 方法 | 返回类型 |
+|------|----------|
+| `run_with_hitl()` | `{"status": "done", "content": "..."}` 或 `{"status": "pending_approval", ...}` |
+| `submit_decision()` | 同上，或 `None`（审批不存在） |
+| `list_pending()` | `list[dict]` |
+| `get_pending()` | `dict` 或 `None` |
+
+`_extract_done()` 是统一的 `GraphOutput` → dict 转换器，确保 HTTP 路由只需直接返回 handler 结果。
+
+## CLI 模式 HITL
+
+CLI 模式通过 `_handle_cli_hitl()` 实现交互式审批：
+
+```python
+while result.interrupts:
+    # 展示每个 tool call 的 name 和 args
+    # 提示用户: Approve? [y/r(eject)]
+    # 收集 decisions
+    # agent.invoke(Command(resume={decisions}), cfg, version="v2")
+```
+
+CLI 使用 `version="v2"` 获取 `GraphOutput`，循环处理直到无中断。
 
 ## PendingApproval 数据模型
 
@@ -147,6 +227,8 @@ Body: {
 2. **`thread_id` 必须一致**——interrupt 和 resume 使用同一个 thread_id
 3. **`checkpointer` 必须配置**——HITL 依赖 LangGraph checkpointer 保存中断状态
 4. **所有 decision 必须一次性提交**——官方 middleware 不支持部分恢复
+5. **`interrupt_on` 必须覆盖所有工具**——未配置的工具会被自动放行，存在安全风险
+6. **ActionRequest key 是 `args`**——不是 `arguments`，由 LangChain 官方 TypedDict 定义
 
 ## 扩展指南
 
@@ -162,12 +244,29 @@ hitl:
         - "^.*safe_operation.*$"
 ```
 
+### 添加新工具到 HITL
+
+在 `agent.py` 的 `build_agent()` 中，新工具会自动被加入 `interrupt_on`（因为从 `tools` 列表动态收集）。但如果工具来自 middleware（如 `load_skill`），需要手动 `all_tool_names.add("tool_name")`。
+
 ### 集成到新路由
 
 ```python
 handler = request.app.state.approval_handler
 result = await handler.run_with_hitl(message, thread_id)
+return result  # 始终是结构化 dict，直接返回
 ```
+
+## 测试
+
+`tests/test_hitl.py` 覆盖以下场景：
+
+| 测试类 | 测试内容 |
+|--------|----------|
+| `TestProcessInterrupt` | 自动审批匹配、不匹配、混合场景、review_configs 解析 |
+| `TestShouldAutoApprove` | 正则匹配、不匹配、不同工具名、通配符 |
+| `TestRunWithHitl` | 无中断、全自动审批、需要人工 |
+| `TestSubmitDecision` | 提交后完成、不存在审批 |
+| `TestPendingManagement` | 空列表、查询不存在 |
 
 ## 调试定位
 
@@ -178,3 +277,6 @@ result = await handler.run_with_hitl(message, thread_id)
 | interrupt 后无法恢复 | 确认 thread_id 一致、checkpointer 已配置 |
 | 多个审批只处理了一个 | `decisions` 数组长度必须匹配所有 action_requests |
 | `result.interrupts` 为空 | 确认使用 `version="v2"` 调用 `agent.ainvoke()` |
+| KeyError: 'arguments' | ActionRequest 使用 `args` 不是 `arguments` |
+| 工具直接执行无审批 | 检查 `HumanInTheLoopMiddleware` 是否在 middleware 列表中 |
+| 新工具绕过审批 | 检查 `interrupt_on` 是否包含该工具名 |

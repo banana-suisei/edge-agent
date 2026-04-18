@@ -31,12 +31,4 @@ async def decide(approval_id: str, req: DecideRequest, request: Request):
     result = await handler.submit_decision(approval_id, req.decisions)
     if result is None:
         raise HTTPException(404, "审批请求不存在或已过期")
-    if isinstance(result, dict) and result.get("status") == "pending_approval":
-        return result
-    messages = result.get("messages", []) if hasattr(result, "get") else []
-    reply = ""
-    for m in reversed(messages):
-        if hasattr(m, "content") and m.type == "ai":
-            reply = m.content
-            break
-    return {"status": "done", "content": reply}
+    return result

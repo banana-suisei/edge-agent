@@ -55,9 +55,14 @@ hitl:
     - tool: "form_generate"
       args_patterns:
         - ".*"                           # 全部自动通过
+    - tool: "load_skill"                 # 只读操作，安全自动通过
+      args_patterns:
+        - ".*"
 ```
 
-每条规则包含 `tool`（工具名）和 `args_patterns`（正则列表）。当工具调用的 `str(arguments)` 匹配任一正则时，自动通过审批。
+每条规则包含 `tool`（工具名）和 `args_patterns`（正则列表）。当工具调用的 `str(args)` 匹配任一正则时，自动通过审批。
+
+**注意**：`HumanInTheLoopMiddleware` 在 `agent.py` 中配置 `interrupt_on` 对所有已知工具名设置为 `True`（默认拦截所有）。此处的 `auto_approve` 规则控制的是拦截后的自动放行行为——未匹配规则的工具调用会暂停等待人工审批。新增工具必须同时出现在 `interrupt_on`（`agent.py` 中自动从 tools 列表收集）和可选的 `auto_approve` 规则中。
 
 ## 加载逻辑
 

@@ -37,6 +37,48 @@ class ApprovalHandler:
                     return True
         return False
 
+    @staticmethod
+    def _extract_done(result) -> dict:
+        state = result.value if hasattr(result, "value") else result
+        messages = state.get("messages", []) if isinstance(state, dict) else []
+        reply = ""
+        for m in reversed(messages):
+            if hasattr(m, "content") and m.type == "ai":
+                reply = m.content
+                break
+        return {"status": "done", "content": reply}
+
+    def _process_interrupt(self, interrupt_value: dict):
+        """Process interrupt value, return (decisions, needs_human, pending_actions)."""
+        action_requests = interrupt_value["action_requests"]
+        review_configs = interrupt_value.get("review_configs", [])
+
+        decisions: list[dict | None] = []
+        needs_human: list[tuple[int, dict]] = []
+
+        for i, action in enumerate(action_requests):
+            if self.should_auto_approve(action["name"], action["args"]):
+                decisions.append({"type": "approve"})
+            else:
+                decisions.append(None)
+                needs_human.append((i, action))
+
+        pending_actions = []
+        for idx, action in needs_human:
+            allowed = ["approve", "edit", "reject"]
+            for rc in review_configs:
+                if rc.get("action_name") == action["name"]:
+                    allowed = rc.get("allowed_decisions", allowed)
+                    break
+            pending_actions.append({
+                "name": action["name"],
+                "args": action["args"],
+                "description": action.get("description", ""),
+                "allowed_decisions": allowed,
+            })
+
+        return action_requests, decisions, needs_human, pending_actions
+
     async def run_with_hitl(self, message: str, thread_id: str):
         config = {"configurable": {"thread_id": thread_id}}
 
@@ -47,27 +89,19 @@ class ApprovalHandler:
         )
 
         if not result.interrupts:
-            return result
+            return self._extract_done(result)
 
-        interrupt = result.interrupts[0]
-        action_requests = interrupt.value["action_requests"]
-
-        decisions: list[dict | None] = []
-        needs_human: list[tuple[int, dict]] = []
-
-        for i, action in enumerate(action_requests):
-            if self.should_auto_approve(action["name"], action["arguments"]):
-                decisions.append({"type": "approve"})
-            else:
-                decisions.append(None)
-                needs_human.append((i, action))
+        action_requests, decisions, needs_human, pending_actions = (
+            self._process_interrupt(result.interrupts[0].value)
+        )
 
         if not needs_human:
-            return await self.agent.ainvoke(
+            result = await self.agent.ainvoke(
                 Command(resume={"decisions": decisions}),
                 config=config,
                 version="v2",
             )
+            return self._extract_done(result)
 
         approval_id = str(uuid4())
         self.pending[thread_id] = PendingApproval(
@@ -82,15 +116,7 @@ class ApprovalHandler:
         return {
             "status": "pending_approval",
             "approval_id": approval_id,
-            "pending_actions": [
-                {
-                    "name": a["name"],
-                    "arguments": a["arguments"],
-                    "description": a.get("description", ""),
-                    "allowed_decisions": a.get("allowed_decisions", ["approve", "edit", "reject"]),
-                }
-                for _, a in needs_human
-            ],
+            "pending_actions": pending_actions,
             "auto_approved_count": len(action_requests) - len(needs_human),
         }
 
@@ -116,7 +142,38 @@ class ApprovalHandler:
         )
 
         self.pending.pop(thread_id, None)
-        return result
+
+        if not result.interrupts:
+            return self._extract_done(result)
+
+        new_action_requests, new_decisions, new_needs_human, new_pending_actions = (
+            self._process_interrupt(result.interrupts[0].value)
+        )
+
+        if not new_needs_human:
+            result = await self.agent.ainvoke(
+                Command(resume={"decisions": new_decisions}),
+                config=pending.config,
+                version="v2",
+            )
+            return self._extract_done(result)
+
+        new_approval_id = str(uuid4())
+        self.pending[thread_id] = PendingApproval(
+            approval_id=new_approval_id,
+            thread_id=thread_id,
+            config=pending.config,
+            action_requests=new_action_requests,
+            decisions=new_decisions,
+            needs_human_indices=[i for i, _ in new_needs_human],
+        )
+
+        return {
+            "status": "pending_approval",
+            "approval_id": new_approval_id,
+            "pending_actions": new_pending_actions,
+            "auto_approved_count": len(new_action_requests) - len(new_needs_human),
+        }
 
     def list_pending(self) -> list[dict]:
         out = []
@@ -126,7 +183,7 @@ class ApprovalHandler:
                 a = p.action_requests[idx]
                 actions.append({
                     "name": a["name"],
-                    "arguments": a["arguments"],
+                    "args": a["args"],
                     "description": a.get("description", ""),
                 })
             out.append({
@@ -145,7 +202,7 @@ class ApprovalHandler:
                     a = p.action_requests[idx]
                     actions.append({
                         "name": a["name"],
-                        "arguments": a["arguments"],
+                        "args": a["args"],
                         "description": a.get("description", ""),
                     })
                 return {

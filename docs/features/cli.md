@@ -17,10 +17,32 @@ plush-agent --config my-config.yaml chat
 
 流程：
 1. 加载配置文件
-2. `build_agent(config)` 创建 agent
+2. `build_agent(config)` 创建 agent（含 `HumanInTheLoopMiddleware`）
 3. 使用固定 `thread_id = "cli-session"` 维持对话上下文
-4. 循环读取用户输入，`_sanitize_surrogates()` 清理编码后，`agent.invoke()` 获取回复
-5. 输入 `/quit` 或空行退出
+4. 循环读取用户输入，`_sanitize_surrogates()` 清理编码后，`agent.invoke(version="v2")` 获取回复
+5. 如果产生 interrupt → `_handle_cli_hitl()` 提示用户审批
+6. `_print_reply()` 从 `GraphOutput.value` 中提取最后一条 AI 消息
+7. 输入 `/quit` 或空行退出
+
+### HITL 交互审批
+
+CLI 模式下 `HumanInTheLoopMiddleware` 同样生效。当 agent 调用工具时：
+
+```
+⚠ Tool call requires approval:
+  Tool: terminal
+  Args: {"commands": "rm -rf /tmp"}
+  Approve? [y/r(eject)]: r
+  Rejection reason: 不要删除文件
+```
+
+审批流程：
+1. `agent.invoke(version="v2")` 返回 `GraphOutput`
+2. `_handle_cli_hitl()` 检查 `result.interrupts`
+3. 遍历 `action_requests`，展示工具名和参数
+4. 用户选择 `y`（approve）或 `r`（reject + 原因）
+5. `agent.invoke(Command(resume={decisions}), version="v2")` 恢复执行
+6. 循环直到无新 interrupt
 
 ### WSL2 编码处理
 
@@ -33,7 +55,7 @@ def _sanitize_surrogates(text: str) -> str:
 
 在用户输入传入 agent 前调用，对正常文本无影响。
 
-**注意**：CLI 模式下不支持 HITL 审批（不经过 ApprovalHandler），tool 直接执行。
+**注意**：CLI 模式同样支持 HITL 审批（通过 `_handle_cli_hitl()` 交互式审批），与 Server 模式共享 `HumanInTheLoopMiddleware`。auto_approve 规则对 CLI 同样生效。
 
 ### plush-agent serve
 

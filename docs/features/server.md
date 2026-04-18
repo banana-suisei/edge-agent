@@ -71,8 +71,8 @@ Content-Type: application/json
   "pending_actions": [
     {
       "name": "terminal",
-      "arguments": {"commands": ["rm -rf /tmp/old"]},
-      "description": "工具执行等待审批...",
+      "args": {"commands": ["rm -rf /tmp/old"]},
+      "description": "Tool execution pending approval\n\nTool: terminal\nArgs: ...",
       "allowed_decisions": ["approve", "edit", "reject"]
     }
   ],
@@ -86,8 +86,7 @@ Content-Type: application/json
 2. `thread_id` 默认为 `"default"`
 3. `_sanitize_surrogates()` 清理请求消息中的代理字符
 4. 调用 `handler.run_with_hitl(message, thread_id)`
-5. 如果结果是 `dict` 且 `status == "pending_approval"` → 直接返回
-6. 否则从 `result["messages"]` 中提取最后一条 AI 消息
+5. 直接返回 handler 结果（始终是结构化 dict）
 
 ## 启动参数
 

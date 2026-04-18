@@ -14,6 +14,14 @@ tools = [bash_tool, load_skill, create_form_generate_tool(config)]
 # + MCP tools (async loaded)
 ```
 
+所有注册的工具自动被加入 `HumanInTheLoopMiddleware` 的 `interrupt_on` 配置（默认拦截所有工具调用）。来自 middleware 的工具（如 `load_skill`）需手动添加到 `all_tool_names`。
+
+```python
+all_tool_names = {t.name for t in tools}
+all_tool_names.add("load_skill")
+interrupt_on = {name: True for name in all_tool_names}
+```
+
 ---
 
 ## Bash Tool (`terminal`)
@@ -120,7 +128,8 @@ _form_events: dict[str, asyncio.Event] = {}  # form_id → Event
 1. 在 `src/plush_agent/tools/` 下创建新模块
 2. 定义 `@tool` 函数
 3. 在 `agent.py` 的 `_collect_tools()` 中导入并添加到列表
-4. 如需 HITL 审批，在 `config.yaml` 的 `hitl` section 添加规则
+4. 新工具自动被加入 `interrupt_on`（从 tools 列表动态收集）
+5. 如需自动审批，在 `config.yaml` 的 `hitl.auto_approve` 中添加规则
 
 ## 调试定位
 

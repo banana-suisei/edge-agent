@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from langchain.agents import create_agent
+from langchain.agents.middleware import HumanInTheLoopMiddleware
 from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.store.memory import InMemoryStore
@@ -26,6 +27,15 @@ def build_agent(config: Config):
 
     tools = _collect_tools(config)
 
+    all_tool_names = {t.name for t in tools}
+    all_tool_names.add("load_skill")
+    interrupt_on = {name: True for name in all_tool_names}
+
+    hitl_middleware = HumanInTheLoopMiddleware(
+        interrupt_on=interrupt_on,
+        description_prefix="Tool execution pending approval",
+    )
+
     store = InMemoryStore()
     checkpointer = InMemorySaver()
 
@@ -33,7 +43,7 @@ def build_agent(config: Config):
         model,
         tools=tools,
         system_prompt=config.agent.system_prompt,
-        middleware=[skill_middleware],
+        middleware=[skill_middleware, hitl_middleware],
         store=store,
         checkpointer=checkpointer,
     )

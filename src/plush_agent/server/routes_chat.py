@@ -22,12 +22,4 @@ async def chat(req: ChatRequest, request: Request):
     thread_id = req.thread_id or "default"
     message = _sanitize_surrogates(req.message)
     result = await handler.run_with_hitl(message, thread_id)
-    if isinstance(result, dict) and result.get("status") == "pending_approval":
-        return result
-    messages = result.get("messages", []) if hasattr(result, "get") else []
-    reply = ""
-    for m in reversed(messages):
-        if hasattr(m, "content") and m.type == "ai":
-            reply = m.content
-            break
-    return {"status": "done", "content": reply}
+    return result

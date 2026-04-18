@@ -27,6 +27,7 @@ Plush-Agent 是一个基于 LangChain 的 ReAct Agent，使用 OpenAI 接口标�
 │  ┌──────┴─────────────────┴─────────────────────────┐   │
 │  │              Middleware Pipeline                  │   │
 │  │  SkillMiddleware → HumanInTheLoopMiddleware      │   │
+│  │  (所有工具默认拦截，interrupt_on={tool:True})      │   │
 │  └──────────────────────────────────────────────────┘   │
 │                                                         │
 └──────────────────────────┬──────────────────────────────┘
@@ -100,10 +101,12 @@ plush-agent/
            → agent.ainvoke(messages, config, version="v2")
              → SkillMiddleware 注入 skill 描述到 system prompt
              → LLM 生成回复 (可能包含 tool_calls)
-             → HumanInTheLoopMiddleware 拦截需要审批的 tool_calls
+             → HumanInTheLoopMiddleware 拦截所有 tool_calls
+               (interrupt_on={tool_name: True}，所有工具默认拦截)
            ← GraphOutput (含 .interrupts)
-         → 自动审批过滤 (正则匹配 tool name + args)
-         → 全部自动通过 → 立即 resume
+         → _process_interrupt() 解析 action_requests + review_configs
+         → should_auto_approve() 正则匹配 tool name + args
+         → 全部自动通过 → resume → _extract_done() 返回结果
          → 需要人工 → 返回 pending_approval 等待 HTTP 决策
 ```
 
@@ -124,18 +127,23 @@ Agent 调用 form_generate(purpose, requirements, timeout)
 
 ```
 ApprovalHandler.run_with_hitl(message, thread_id)
-  1. agent.ainvoke() → GraphOutput
-  2. result.interrupts 为空 → 直接返回
-  3. 遍历 action_requests:
-     - 匹配 auto_approve 规则 → decisions[i] = {"type": "approve"}
+  1. agent.ainvoke(version="v2") → GraphOutput
+  2. result.interrupts 为空 → _extract_done() 返回 {"status": "done", ...}
+  3. _process_interrupt() 解析 interrupt.value:
+     - action_requests: [{name, args, description}, ...]
+     - review_configs: [{action_name, allowed_decisions}, ...]
+  4. 遍历 action_requests:
+     - should_auto_approve(name, args) → decisions[i] = {"type": "approve"}
      - 不匹配 → decisions[i] = None, 加入 needs_human
-  4. needs_human 为空 → agent.ainvoke(Command(resume=decisions))
-  5. needs_human 非空 → 存入 self.pending, 返回 pending_approval
+  5. needs_human 为空 → resume → _extract_done()
+  6. needs_human 非空 → 存入 self.pending, 返回 {"status": "pending_approval", ...}
 
 用户 POST /api/approvals/{id}/decide
   → ApprovalHandler.submit_decision()
     → 填充 human_decisions 到 decisions 数组
     → agent.ainvoke(Command(resume=all_decisions))
+    → 可能产生新的 interrupt → 再次进入 _process_interrupt() 循环
+    → 无新 interrupt → _extract_done() 返回结果
 ```
 
 ## 模块依赖关系
