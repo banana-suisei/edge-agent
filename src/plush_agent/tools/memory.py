@@ -6,42 +6,40 @@ import time
 
 from langchain.tools import ToolRuntime, tool
 
+_MEMORY_NAMESPACE = ("users", "default")
+
 
 @tool
-def save_memory(namespace: str, key: str, value: str, runtime: ToolRuntime) -> str:
+def save_memory(key: str, value: str, runtime: ToolRuntime) -> str:
     """Save a piece of information to long-term memory for later recall.
 
     Use this when the user explicitly asks you to remember something, or when
     you detect important user preferences, facts, or context worth persisting.
 
     Args:
-        namespace: Hierarchical path separated by '/', e.g. "users/user_123/preferences".
         key: A short descriptive identifier for this memory.
         value: The content to store.
     """
     assert runtime.store is not None
-    ns = tuple(namespace.split("/"))
-    runtime.store.put(ns, key, {"content": value})
-    return f"Saved '{key}' under '{namespace}'."
+    runtime.store.put(_MEMORY_NAMESPACE, key, {"content": value})
+    return f"Saved '{key}'."
 
 
 @tool
-def search_memory(namespace: str, query: str, runtime: ToolRuntime) -> str:
+def search_memory(query: str, runtime: ToolRuntime) -> str:
     """Search memories by semantic similarity.
 
     Args:
-        namespace: Hierarchical path separated by '/', e.g. "users/user_123".
         query: Natural language query describing what you're looking for.
     """
     assert runtime.store is not None
-    ns = tuple(namespace.split("/"))
     try:
-        items = runtime.store.search(ns, query=query, limit=10)
+        items = runtime.store.search(_MEMORY_NAMESPACE, query=query, limit=10)
     except Exception:
-        return f"Error searching '{namespace}'."
+        return "Error searching memories."
 
     if not items:
-        return f"No memories found in '{namespace}' for: {query}"
+        return f"No memories found for: {query}"
 
     lines = []
     for item in items:
@@ -51,37 +49,33 @@ def search_memory(namespace: str, query: str, runtime: ToolRuntime) -> str:
 
 
 @tool
-def get_memory(namespace: str, key: str, runtime: ToolRuntime) -> str:
-    """Retrieve a specific memory by namespace and key.
+def get_memory(key: str, runtime: ToolRuntime) -> str:
+    """Retrieve a specific memory by key.
 
     Args:
-        namespace: Hierarchical path separated by '/', e.g. "users/user_123/preferences".
         key: The identifier used when saving.
     """
     assert runtime.store is not None
-    ns = tuple(namespace.split("/"))
-    item = runtime.store.get(ns, key)
+    item = runtime.store.get(_MEMORY_NAMESPACE, key)
     if item is None:
-        return f"Memory '{key}' not found in '{namespace}'."
+        return f"Memory '{key}' not found."
     content = item.value.get("content", str(item.value)) if isinstance(item.value, dict) else str(item.value)
     return content
 
 
 @tool
-def delete_memory(namespace: str, key: str, runtime: ToolRuntime) -> str:
-    """Delete a specific memory by namespace and key.
+def delete_memory(key: str, runtime: ToolRuntime) -> str:
+    """Delete a specific memory by key.
 
     Args:
-        namespace: Hierarchical path separated by '/', e.g. "users/user_123/preferences".
         key: The identifier used when saving.
     """
     assert runtime.store is not None
-    ns = tuple(namespace.split("/"))
-    item = runtime.store.get(ns, key)
+    item = runtime.store.get(_MEMORY_NAMESPACE, key)
     if item is None:
-        return f"Memory '{key}' not found in '{namespace}'."
-    runtime.store.delete(ns, key)
-    return f"Deleted '{key}' from '{namespace}'."
+        return f"Memory '{key}' not found."
+    runtime.store.delete(_MEMORY_NAMESPACE, key)
+    return f"Deleted '{key}'."
 
 
 memory_tools = [save_memory, search_memory, get_memory, delete_memory]

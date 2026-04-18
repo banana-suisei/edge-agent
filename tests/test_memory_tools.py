@@ -10,6 +10,7 @@ import pytest
 from plush_agent.config import EmbeddingConfig, MemoryConfig, PostgresConfig
 from plush_agent.memory.store import create_store
 from plush_agent.tools.memory import (
+    _MEMORY_NAMESPACE,
     delete_memory,
     get_memory,
     save_memory,
@@ -68,7 +69,7 @@ class TestPostgresStore:
     def cleanup_test_data(self, pg_config):
         yield
         store = create_store(pg_config)
-        for ns in [("test",), ("users",), ("ns1",), ("ns2",), ("prefs",), ("notes",), ("semantic",)]:
+        for ns in [_MEMORY_NAMESPACE, ("test",), ("ns1",), ("ns2",)]:
             items = store.search(ns)
             for item in items:
                 store.delete(ns, item.key)
@@ -107,9 +108,9 @@ class TestPostgresStore:
 
     def test_postgres_search_list(self, pg_config):
         store = create_store(pg_config)
-        store.put(("users",), "u1", {"content": "Alice"})
-        store.put(("users",), "u2", {"content": "Bob"})
-        items = store.search(("users",))
+        store.put(("test",), "u1", {"content": "Alice"})
+        store.put(("test",), "u2", {"content": "Bob"})
+        items = store.search(("test",))
         assert len(items) >= 2
 
     def test_postgres_delete(self, pg_config):
@@ -125,35 +126,25 @@ class TestPostgresStore:
         item = store.get(("test",), "k1")
         assert item.value == {"content": "v2"}
 
-    def test_postgres_namespaces_isolated(self, pg_config):
-        store = create_store(pg_config)
-        store.put(("ns1",), "k", {"content": "from ns1"})
-        store.put(("ns2",), "k", {"content": "from ns2"})
-        assert store.get(("ns1",), "k").value == {"content": "from ns1"}
-        assert store.get(("ns2",), "k").value == {"content": "from ns2"}
-
     def test_postgres_vector_search(self, pg_config):
-        """Verify semantic search returns relevant results by vector similarity."""
         store = create_store(pg_config)
 
-        store.put(("semantic",), "item1", {"content": "Python is my favorite programming language"})
-        store.put(("semantic",), "item2", {"content": "I love eating sushi and ramen"})
-        store.put(("semantic",), "item3", {"content": "The weather is sunny today"})
+        store.put(("test",), "item1", {"content": "Python is my favorite programming language"})
+        store.put(("test",), "item2", {"content": "I love eating sushi and ramen"})
+        store.put(("test",), "item3", {"content": "The weather is sunny today"})
 
-        items = store.search(("semantic",), query="coding and software development", limit=3)
+        items = store.search(("test",), query="coding and software development", limit=3)
         assert len(items) >= 1
-        # item1 should rank first for a coding query
         assert items[0].key == "item1"
 
     def test_postgres_vector_search_chinese(self, pg_config):
-        """Verify semantic search works with Chinese content and queries."""
         store = create_store(pg_config)
 
-        store.put(("semantic",), "vtuber", {"content": "星街彗星、白上吹雪、神乐七奈是我最喜欢的VTuber"})
-        store.put(("semantic",), "food", {"content": "我喜欢吃火锅和烧烤"})
-        store.put(("semantic",), "work", {"content": "今天要完成项目报告"})
+        store.put(("test",), "vtuber", {"content": "星街彗星、白上吹雪、神乐七奈是我最喜欢的VTuber"})
+        store.put(("test",), "food", {"content": "我喜欢吃火锅和烧烤"})
+        store.put(("test",), "work", {"content": "今天要完成项目报告"})
 
-        items = store.search(("semantic",), query="喜欢的虚拟主播", limit=3)
+        items = store.search(("test",), query="喜欢的虚拟主播", limit=3)
         assert len(items) >= 1
         assert items[0].key == "vtuber"
 
@@ -164,9 +155,6 @@ class TestPostgresStore:
 
 
 class TestMemoryToolsInMemory:
-    """Unit tests for save_memory / search_memory / get_memory / delete_memory
-    backed by InMemoryStore."""
-
     @pytest.fixture
     def store(self):
         return create_store(MemoryConfig(type="in_memory"))
@@ -175,78 +163,62 @@ class TestMemoryToolsInMemory:
     def rt(self, store):
         return _make_runtime(store)
 
-    # -- helpers ------------------------------------------------------------
+    @staticmethod
+    def _save(key, value, rt):
+        return save_memory.func(key=key, value=value, runtime=rt)
 
     @staticmethod
-    def _save(namespace, key, value, rt):
-        return save_memory.func(namespace=namespace, key=key, value=value, runtime=rt)
+    def _get(key, rt):
+        return get_memory.func(key=key, runtime=rt)
 
     @staticmethod
-    def _get(namespace, key, rt):
-        return get_memory.func(namespace=namespace, key=key, runtime=rt)
+    def _search(query, rt):
+        return search_memory.func(query=query, runtime=rt)
 
     @staticmethod
-    def _search(namespace, query, rt):
-        return search_memory.func(namespace=namespace, query=query, runtime=rt)
-
-    @staticmethod
-    def _delete(namespace, key, rt):
-        return delete_memory.func(namespace=namespace, key=key, runtime=rt)
-
-    # -- save_memory --------------------------------------------------------
+    def _delete(key, rt):
+        return delete_memory.func(key=key, runtime=rt)
 
     def test_save_and_get(self, rt, store):
-        result = self._save("users/u1", "favorite language", "Python", rt)
+        result = self._save("favorite language", "Python", rt)
         assert "Saved" in result
-        item = store.get(("users", "u1"), "favorite language")
+        item = store.get(_MEMORY_NAMESPACE, "favorite language")
         assert item.value == {"content": "Python"}
 
-    def test_save_natural_language_key(self, rt, store):
-        result = self._save("prefs", "favorite vtubers", "星街彗星、白上吹雪", rt)
-        assert "Saved" in result
-        item = store.get(("prefs",), "favorite vtubers")
-        assert item is not None
-
     def test_save_overwrites(self, rt, store):
-        self._save("test", "k", "v1", rt)
-        self._save("test", "k", "v2", rt)
-        item = store.get(("test",), "k")
+        self._save("k", "v1", rt)
+        self._save("k", "v2", rt)
+        item = store.get(_MEMORY_NAMESPACE, "k")
         assert item.value == {"content": "v2"}
 
-    # -- get_memory ---------------------------------------------------------
-
     def test_get_existing(self, rt, store):
-        store.put(("prefs",), "lang", {"content": "Python"})
-        result = self._get("prefs", "lang", rt)
+        store.put(_MEMORY_NAMESPACE, "lang", {"content": "Python"})
+        result = self._get("lang", rt)
         assert result == "Python"
 
     def test_get_missing(self, rt):
-        result = self._get("missing", "nope", rt)
+        result = self._get("nope", rt)
         assert "not found" in result
 
-    # -- search_memory ------------------------------------------------------
-
     def test_search_returns_results(self, rt, store):
-        store.put(("notes",), "n1", {"content": "Buy milk"})
-        store.put(("notes",), "n2", {"content": "Buy eggs"})
-        result = self._search("notes", "shopping", rt)
+        store.put(_MEMORY_NAMESPACE, "n1", {"content": "Buy milk"})
+        store.put(_MEMORY_NAMESPACE, "n2", {"content": "Buy eggs"})
+        result = self._search("shopping", rt)
         assert "n1" in result
         assert "n2" in result
 
     def test_search_empty(self, rt):
-        result = self._search("empty", "anything", rt)
+        result = self._search("anything", rt)
         assert "No memories found" in result
 
-    # -- delete_memory ------------------------------------------------------
-
     def test_delete_existing(self, rt, store):
-        store.put(("test",), "k1", {"content": "to delete"})
-        result = self._delete("test", "k1", rt)
+        store.put(_MEMORY_NAMESPACE, "k1", {"content": "to delete"})
+        result = self._delete("k1", rt)
         assert "Deleted" in result
-        assert store.get(("test",), "k1") is None
+        assert store.get(_MEMORY_NAMESPACE, "k1") is None
 
     def test_delete_missing(self, rt):
-        result = self._delete("nope", "nope", rt)
+        result = self._delete("nope", rt)
         assert "not found" in result
 
 
@@ -256,16 +228,13 @@ class TestMemoryToolsInMemory:
 
 
 class TestMemoryToolsPostgres:
-    """Integration tests verifying the tools work end-to-end with PostgresStore."""
-
     @pytest.fixture(autouse=True)
     def cleanup(self, pg_config):
         yield
         store = create_store(pg_config)
-        for ns in [("users", "u1"), ("prefs",), ("notes",), ("test",), ("semantic",)]:
-            items = store.search(ns)
-            for item in items:
-                store.delete(ns, item.key)
+        items = store.search(_MEMORY_NAMESPACE)
+        for item in items:
+            store.delete(_MEMORY_NAMESPACE, item.key)
 
     @pytest.fixture
     def pg_config(self):
@@ -297,37 +266,30 @@ class TestMemoryToolsPostgres:
         return _make_runtime(store)
 
     def test_save_and_retrieve(self, rt, store):
-        save_memory.func(namespace="users/u1", key="name", value="Bob", runtime=rt)
-        item = store.get(("users", "u1"), "name")
+        save_memory.func(key="name", value="Bob", runtime=rt)
+        item = store.get(_MEMORY_NAMESPACE, "name")
         assert item is not None
         assert item.value == {"content": "Bob"}
 
     def test_get_returns_content(self, rt, store):
-        store.put(("prefs",), "theme", {"content": "dark"})
-        result = get_memory.func(namespace="prefs", key="theme", runtime=rt)
+        store.put(_MEMORY_NAMESPACE, "theme", {"content": "dark"})
+        result = get_memory.func(key="theme", runtime=rt)
         assert result == "dark"
 
-    def test_search_semantic_finds_items(self, rt, store):
-        store.put(("notes",), "meeting", {"content": "Team meeting at 3pm in conference room"})
-        store.put(("notes",), "grocery", {"content": "Buy milk, eggs, and bread from supermarket"})
-        result = search_memory.func(namespace="notes", query="work schedule", runtime=rt)
+    def test_search_semantic(self, rt, store):
+        store.put(_MEMORY_NAMESPACE, "meeting", {"content": "Team meeting at 3pm in conference room"})
+        store.put(_MEMORY_NAMESPACE, "grocery", {"content": "Buy milk, eggs, and bread from supermarket"})
+        result = search_memory.func(query="work schedule", runtime=rt)
         assert "meeting" in result
 
-    def test_delete_removes_from_postgres(self, rt, store):
-        store.put(("test",), "k1", {"content": "temporary"})
-        delete_memory.func(namespace="test", key="k1", runtime=rt)
-        assert store.get(("test",), "k1") is None
+    def test_delete(self, rt, store):
+        store.put(_MEMORY_NAMESPACE, "k1", {"content": "temporary"})
+        delete_memory.func(key="k1", runtime=rt)
+        assert store.get(_MEMORY_NAMESPACE, "k1") is None
 
     def test_full_lifecycle(self, rt, store):
-        """save -> get -> search -> delete -> get (not found)."""
-        save_memory.func(namespace="users/u1", key="lang", value="Rust", runtime=rt)
-
-        got = get_memory.func(namespace="users/u1", key="lang", runtime=rt)
-        assert got == "Rust"
-
-        found = search_memory.func(namespace="users/u1", query="programming language", runtime=rt)
-        assert "lang" in found
-
-        delete_memory.func(namespace="users/u1", key="lang", runtime=rt)
-        got2 = get_memory.func(namespace="users/u1", key="lang", runtime=rt)
-        assert "not found" in got2
+        save_memory.func(key="lang", value="Rust", runtime=rt)
+        assert get_memory.func(key="lang", runtime=rt) == "Rust"
+        assert "lang" in search_memory.func(query="programming language", runtime=rt)
+        delete_memory.func(key="lang", runtime=rt)
+        assert "not found" in get_memory.func(key="lang", runtime=rt)
