@@ -50,9 +50,23 @@ class PostgresConfig:
 
 
 @dataclass
+class EmbeddingConfig:
+    base_url: str = "https://api.openai.com/v1"
+    api_key_env: str = "OPENAI_API_KEY"
+    model_name: str = "text-embedding-3-small"
+    dims: int = 1536
+    distance_type: str = "cosine"  # l2 / inner_product / cosine
+
+    @property
+    def api_key(self) -> str:
+        return os.environ.get(self.api_key_env, self.api_key_env)
+
+
+@dataclass
 class MemoryConfig:
     type: str = "postgres"
     postgres: PostgresConfig = field(default_factory=PostgresConfig)
+    embedding: EmbeddingConfig = field(default_factory=EmbeddingConfig)
 
 
 @dataclass
@@ -127,6 +141,15 @@ def load_config(path: str | Path) -> Config:
                 password=p.get("password", "postgres"),
                 database=p.get("database", "plush_agent"),
                 sslmode=p.get("sslmode", "prefer"),
+            )
+        if "embedding" in mem:
+            e = mem["embedding"]
+            cfg.memory.embedding = EmbeddingConfig(
+                base_url=e.get("base_url", cfg.memory.embedding.base_url),
+                api_key_env=e.get("api_key_env", cfg.memory.embedding.api_key_env),
+                model_name=e.get("model_name", cfg.memory.embedding.model_name),
+                dims=e.get("dims", cfg.memory.embedding.dims),
+                distance_type=e.get("distance_type", cfg.memory.embedding.distance_type),
             )
 
     if "server" in raw:

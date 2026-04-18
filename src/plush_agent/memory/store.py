@@ -1,4 +1,4 @@
-"""Store factory — creates InMemoryStore or PostgresStore using official APIs."""
+"""Store factory — creates InMemoryStore or PostgresStore with vector index support."""
 
 from __future__ import annotations
 
@@ -13,7 +13,8 @@ def create_store(config: MemoryConfig) -> BaseStore:
         from psycopg.rows import dict_row
         from psycopg_pool import ConnectionPool
 
-        from langgraph.store.postgres import PostgresStore  # type: ignore[import-not-found]
+        from langchain_openai import OpenAIEmbeddings
+        from langgraph.store.postgres import PostgresStore
 
         pool: ConnectionPool = ConnectionPool(
             config.postgres.connection_string,
@@ -26,7 +27,23 @@ def create_store(config: MemoryConfig) -> BaseStore:
             },
             open=True,
         )
-        store = PostgresStore(conn=pool)
+
+        embeddings = OpenAIEmbeddings(
+            base_url=config.embedding.base_url,
+            api_key=config.embedding.api_key,
+            model=config.embedding.model_name,
+            check_embedding_ctx_length=False,
+        )
+
+        index_config = {
+            "dims": config.embedding.dims,
+            "embed": embeddings,
+            "fields": ["content"],
+            "distance_type": config.embedding.distance_type,
+            "ann_index_config": {"kind": "flat"},
+        }
+
+        store = PostgresStore(conn=pool, index=index_config)
         store.setup()
         return store
 

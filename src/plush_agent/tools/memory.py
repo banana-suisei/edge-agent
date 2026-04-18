@@ -2,22 +2,9 @@
 
 from __future__ import annotations
 
-import re
 import time
 
 from langchain.tools import ToolRuntime, tool
-
-_RE_KEYWORD = re.compile(r"^[a-z0-9][a-z0-9\-]*$")
-
-
-def _normalize_keywords(raw: str) -> list[str]:
-    """Normalize keyword string: convert spaces/slashes to commas, lowercase, validate.
-
-    Returns only keywords matching [a-z0-9][a-z0-9-]* (lowercase English / Roman-numeral style).
-    """
-    normalized = raw.replace(" ", ",").replace("/", ",")
-    keywords = [kw.strip().lower() for kw in normalized.split(",")]
-    return [kw for kw in keywords if kw and _RE_KEYWORD.match(kw)]
 
 
 @tool
@@ -29,67 +16,35 @@ def save_memory(namespace: str, key: str, value: str, runtime: ToolRuntime) -> s
 
     Args:
         namespace: Hierarchical path separated by '/', e.g. "users/user_123/preferences".
-        key: 3-5 comma-separated lowercase English keywords summarizing the content.
-            Spaces and slashes are automatically converted to commas.
-            Example: "python,data-analysis,preference".
+        key: A short descriptive identifier for this memory.
         value: The content to store.
     """
     assert runtime.store is not None
-    keywords = _normalize_keywords(key)
-    if not keywords:
-        return "Invalid key: must contain at least one lowercase English keyword (letters, digits, hyphens)."
-    normalized_key = ",".join(keywords)
     ns = tuple(namespace.split("/"))
-    runtime.store.put(ns, normalized_key, {"content": value})
-    return f"Saved '{normalized_key}' under '{namespace}'."
+    runtime.store.put(ns, key, {"content": value})
+    return f"Saved '{key}' under '{namespace}'."
 
 
 @tool
 def search_memory(namespace: str, query: str, runtime: ToolRuntime) -> str:
-    """Search for memories in a namespace. Returns matching items sorted by keyword relevance.
+    """Search memories by semantic similarity.
 
     Args:
         namespace: Hierarchical path separated by '/', e.g. "users/user_123".
-        query: 3-5 comma-separated lowercase English keywords.
-            Spaces and slashes are automatically converted to commas.
-            Returns memories matching ANY keyword, sorted by match count (most first).
-            Example: "python,programming" finds memories tagged with either keyword.
+        query: Natural language query describing what you're looking for.
     """
     assert runtime.store is not None
     ns = tuple(namespace.split("/"))
-    query_keywords = list(dict.fromkeys(_normalize_keywords(query)))  # deduplicated
-    if not query_keywords:
-        return "Invalid query: must contain at least one lowercase English keyword."
-
-    query_set = set(query_keywords)
-
-    # Single DB call: fetch all items in namespace (no query = list mode)
     try:
-        all_items = runtime.store.search(ns, limit=1000)
+        items = runtime.store.search(ns, query=query, limit=10)
     except Exception:
         return f"Error searching '{namespace}'."
 
-    if not all_items:
-        return f"No memories found in '{namespace}'."
-
-    # Filter & score: matched_query_keywords / total_query_keywords
-    scored = []
-    for item in all_items:
-        item_keywords = set(_normalize_keywords(item.key))
-        matched_count = len(query_set & item_keywords)
-        if matched_count == 0:
-            continue
-        score = matched_count / len(query_set)
-        scored.append((item, score, matched_count))
-
-    if not scored:
-        return f"No memories found in '{namespace}' for keywords: {', '.join(query_keywords)}."
-
-    scored.sort(key=lambda x: (x[1], x[2]), reverse=True)
-    scored = scored[:50]
+    if not items:
+        return f"No memories found in '{namespace}' for: {query}"
 
     lines = []
-    for item, _score, _count in scored:
+    for item in items:
         content = item.value.get("content", str(item.value)) if isinstance(item.value, dict) else str(item.value)
         lines.append(f"[{item.key}] {content}")
     return "\n".join(lines)
@@ -101,15 +56,13 @@ def get_memory(namespace: str, key: str, runtime: ToolRuntime) -> str:
 
     Args:
         namespace: Hierarchical path separated by '/', e.g. "users/user_123/preferences".
-        key: Comma-separated lowercase English keywords used when saving.
+        key: The identifier used when saving.
     """
     assert runtime.store is not None
-    keywords = _normalize_keywords(key)
-    normalized_key = ",".join(keywords) if keywords else key
     ns = tuple(namespace.split("/"))
-    item = runtime.store.get(ns, normalized_key)
+    item = runtime.store.get(ns, key)
     if item is None:
-        return f"Memory '{normalized_key}' not found in '{namespace}'."
+        return f"Memory '{key}' not found in '{namespace}'."
     content = item.value.get("content", str(item.value)) if isinstance(item.value, dict) else str(item.value)
     return content
 
@@ -120,17 +73,15 @@ def delete_memory(namespace: str, key: str, runtime: ToolRuntime) -> str:
 
     Args:
         namespace: Hierarchical path separated by '/', e.g. "users/user_123/preferences".
-        key: Comma-separated lowercase English keywords used when saving.
+        key: The identifier used when saving.
     """
     assert runtime.store is not None
-    keywords = _normalize_keywords(key)
-    normalized_key = ",".join(keywords) if keywords else key
     ns = tuple(namespace.split("/"))
-    item = runtime.store.get(ns, normalized_key)
+    item = runtime.store.get(ns, key)
     if item is None:
-        return f"Memory '{normalized_key}' not found in '{namespace}'."
-    runtime.store.delete(ns, normalized_key)
-    return f"Deleted '{normalized_key}' from '{namespace}'."
+        return f"Memory '{key}' not found in '{namespace}'."
+    runtime.store.delete(ns, key)
+    return f"Deleted '{key}' from '{namespace}'."
 
 
 memory_tools = [save_memory, search_memory, get_memory, delete_memory]
