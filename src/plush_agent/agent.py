@@ -54,7 +54,8 @@ def build_agent(config: Config):
 def _collect_tools(config: Config):
     from plush_agent.tools.bash import bash_tool
     from plush_agent.tools.form import create_form_generate_tool
+    from plush_agent.tools.memory import memory_tools
     from plush_agent.skills.middleware import load_skill
 
-    tools = [bash_tool, load_skill, create_form_generate_tool(config)]
+    tools = [bash_tool, load_skill, create_form_generate_tool(config), *memory_tools]
     return tools
