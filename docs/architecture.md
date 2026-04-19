@@ -35,27 +35,29 @@ Plush-Agent 是一个基于 LangChain 的 ReAct Agent，使用 OpenAI 接口标�
                            │
         ┌──────────────────┼──────────────────────┐
         ▼                  ▼                      ▼
-┌──────────────┐  ┌──────────────┐  ┌──────────────────────┐
-│   Tools 层    │  │  记忆层      │  │  Skills 层           │
-│              │  │             │  │                      │
-│ ┌──────────┐ │  │ PostgresStore│  │ .skill/              │
-│ │ terminal │ │  │ (PostgreSQL) │  │ └── <name>/           │
-│ │ (Bash)   │ │  │ namespace/  │  │     ├── SKILL.md     │
-│ ├──────────┤ │  │ key → JSON  │  │     ├── scripts/     │
-│ │form_     │ │  │             │  │     └── references/  │
-│ │generate  │ │  └─────────────┘  │                      │
-│ ├──────────┤ │                    │  SkillLoader (扫描)  │
-│ │load_skill│ │  ┌──────────────┐  │  SkillMiddleware     │
-│ ├──────────┤ │  │  MCP 层      │  │  (渐进式披露)        │
-│ │memory_   │ │  │             │  └──────────────────────┘
-│ │tools     │ │  │ MultiServer │
-│ ├──────────┤ │  │ MCPClient   │
-│ │MCP tools │ │  │ (from JSON) │
-│ │(动态加载)│ │  └──────────────┘
-│ └──────────┘ │
+┌──────────────┐  ┌────────────────────────┐  ┌──────────────────────┐
+│   Tools 层    │  │  记忆层                │  │  Skills 层           │
+│              │  │                       │  │                      │
+│ ┌──────────┐ │  │ PostgresStore          │  │ .skill/              │
+│ │ terminal │ │  │ + pgvector (向量搜索)  │  │ └── <name>/           │
+│ │ (Bash)   │ │  │ + OpenAIEmbeddings     │  │     ├── SKILL.md     │
+│ ├──────────┤ │  │ namespace/             │  │     ├── scripts/     │
+│ │form_     │ │  │ key → JSON (含向量)    │  │     └── references/  │
+│ │generate  │ │  │                       │  │                      │
+│ ├──────────┤ │  └────────────────────────┘  │  SkillLoader (扫描)  │
+│ │load_skill│ │                               │  SkillMiddleware     │
+│ ├──────────┤ │  ┌──────────────┐            │  (渐进式披露)        │
+│ │memory_   │ │  │  MCP 层      │            └──────────────────────┘
+│ │tools     │ │  │             │
+│ ├──────────┤ │  │ MultiServer │
+│ │MCP tools │ │  │ MCPClient   │
+│ │(动态加载)│ │  │ (from JSON) │
+│ └──────────┘ │  └──────────────┘
 └──────────────┘
 
 memory_tools 通过 runtime.store 读写 PostgresStore，是长期记忆数据写入的唯一入口。
+store.setup() 自动创建 pgvector 向量索引表；需要 PostgreSQL 预装 pgvector 扩展。
+search_memory 使用 store.search(ns, query=...) 进行向量语义搜索。
 会话摘要使用固定 key "latest" 写入 ("sessions",) 命名空间，下次启动时自动加载。
 ```
 
@@ -122,21 +124,25 @@ plush-agent/
 ```
 Agent 对话中
   → LLM 判断需要记忆信息
-  → 调用 save_memory(namespace, key, value)
-    key 为 3-5 个逗号分隔的英文关键词（如 "python,data-analysis,preference"）
-    → runtime.store.put(namespace, key, {"content": value})
-    → 写入 PostgresStore → PostgreSQL
+  → 调用 save_memory(key, value)
+    key 为自然语言标识（如 "user preference for python data analysis"）
+    namespace 固定为 ("users", "default")
+    → runtime.store.put(("users","default"), key, {"content": value})
+    → PostgresStore 自动对 content 字段生成向量嵌入 (OpenAIEmbeddings)
+    → 写入 PostgreSQL (pgvector)
 
 Agent 对话中
   → LLM 判断需要回忆信息
-  → 调用 search_memory(namespace, query)
-    query 为 3-5 个空格分隔的英文关键词（如 "programming plan schedule"）
-    → runtime.store.search(namespace, query=query)
-    → 从 PostgresStore 读取 → 返回给 Agent
+  → 调用 search_memory(query)
+    query 为自然语言查询（如 "user likes programming"）
+    namespace 固定为 ("users", "default")
+    → runtime.store.search(("users","default"), query=query)
+    → PostgresStore 使用 pgvector 进行余弦相似度向量搜索
+    → 返回语义最相关的记忆 → 返回给 Agent
 
 会话结束时（CLI /quit 或 POST /api/chat/end）
   → save_session_summary(store, messages, config)
-    → LLM 生成对话摘要
+    → LLM 生成对话摘要（含重试逻辑，最多 3 次尝试避免空响应）
     → store.put(("sessions",), "latest", {"content": summary, ...})
     → 写入 PostgresStore
 
@@ -219,9 +225,10 @@ server/routes_*.py → tools/form.py
 | 自动审批 | CLI 和 HTTP 双路径实现 | `_should_auto_approve()` 在 CLI 层，`ApprovalHandler` 在 HTTP 层，共享同一正则匹配逻辑 |
 | Skills 格式 | agentskills.io 规范 | 开放标准，SKILL.md 可读、可审计、易分享 |
 | 表单等待 | `asyncio.Event` + 内存 store | 简单可靠，单进程部署足够 |
-| 长期记忆存储 | PostgreSQL (PostgresStore) | 生产级持久化，跨进程共享，支持向量搜索 |
+| 长期记忆存储 | PostgreSQL + pgvector (PostgresStore + OpenAIEmbeddings) | 生产级持久化，跨进程共享，原生向量语义搜索支持 |
 | 记忆访问方式 | 通过 `runtime.store` 在 tool 中读写 | LangChain 官方模式：store 传入 create_agent 后，tool 通过 ToolRuntime.store 访问 |
-| 记忆搜索关键词 | 英文关键词（key 列存逗号分隔，query 用空格分隔） | 提高跨语言召回率，避免中文单词汇匹配率低 |
+| 记忆搜索方式 | 向量语义搜索 (pgvector + Embeddings, cosine similarity) | 自然语言查询，语义匹配比关键词匹配更准确，跨语言无障碍 |
+| 记忆命名空间 | 固定 `("users", "default")` | 简化接口，所有记忆工具无需 namespace 参数 |
 | 会话摘要 | 固定 key `"latest"` 写入 `("sessions",)` 命名空间 | 简单可靠，每次启动自动加载上次摘要 |
 | 记忆工具审批 | 自动通过（`auto_approve: .*`） | 记忆操作无安全风险，无需人工确认 |
 | MCP 加载 | JSON 文件 | MCP 的 MultiServerMCPClient 接受 dict，JSON 映射最直接 |

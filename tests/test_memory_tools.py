@@ -3,17 +3,21 @@ and the underlying store operations (InMemoryStore and PostgresStore with vector
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from plush_agent.config import EmbeddingConfig, MemoryConfig, PostgresConfig
 from plush_agent.memory.store import create_store
 from plush_agent.tools.memory import (
+    SESSION_SUMMARY_NAMESPACE,
+    SESSION_SUMMARY_KEY,
     _MEMORY_NAMESPACE,
     delete_memory,
     get_memory,
+    load_session_summary,
     save_memory,
+    save_session_summary,
     search_memory,
 )
 
@@ -293,3 +297,153 @@ class TestMemoryToolsPostgres:
         assert "lang" in search_memory.func(query="programming language", runtime=rt)
         delete_memory.func(key="lang", runtime=rt)
         assert "not found" in get_memory.func(key="lang", runtime=rt)
+
+
+# ===========================================================================
+# Session summary tests
+# ===========================================================================
+
+
+class TestSessionSummary:
+    """Tests for save_session_summary / load_session_summary."""
+
+    @pytest.fixture(autouse=True)
+    def cleanup(self):
+        yield
+        store = create_store(self._pg_config())
+        item = store.get(SESSION_SUMMARY_NAMESPACE, SESSION_SUMMARY_KEY)
+        if item:
+            store.delete(SESSION_SUMMARY_NAMESPACE, SESSION_SUMMARY_KEY)
+
+    @staticmethod
+    def _pg_config():
+        return MemoryConfig(
+            type="postgres",
+            postgres=PostgresConfig(
+                host="192.168.1.172",
+                port=5432,
+                user="postgres",
+                password="y8@pjqEgJztupe9Z3Dd4",
+                database="plush_agent",
+                sslmode="disable",
+            ),
+            embedding=EmbeddingConfig(
+                base_url="https://openrouter.ai/api/v1",
+                api_key_env="your_api_key_here",
+                model_name="qwen/qwen3-embedding-8b",
+                dims=4096,
+                distance_type="cosine",
+            ),
+        )
+
+    @staticmethod
+    def _mock_config():
+        """Config with a mock LLM that returns a preset summary."""
+        from unittest.mock import MagicMock
+        config = MagicMock()
+        config.model.base_url = "https://example.com/v1"
+        config.model.api_key = "fake"
+        config.model.model_name = "fake"
+        return config
+
+    @staticmethod
+    def _make_messages():
+        from langchain_core.messages import AIMessage, HumanMessage
+        return [
+            HumanMessage(content="记住我最喜欢的颜色是蓝色"),
+            AIMessage(content="好的，已记住你喜欢蓝色"),
+        ]
+
+    def test_empty_messages_returns_none(self):
+        store = create_store(MemoryConfig(type="in_memory"))
+        result = save_session_summary(store, [], self._mock_config())
+        assert result is None
+
+    def test_no_human_ai_messages_returns_none(self):
+        store = create_store(MemoryConfig(type="in_memory"))
+        result = save_session_summary(store, ["not a message"], self._mock_config())
+        assert result is None
+
+    @patch("langchain_openai.ChatOpenAI")
+    def test_llm_returns_empty_retries_and_fails(self, mock_chat_cls):
+        """If LLM returns empty every time, save_session_summary returns None."""
+        mock_response = MagicMock()
+        mock_response.content = ""
+        mock_chat_cls.return_value.invoke.return_value = mock_response
+
+        store = create_store(MemoryConfig(type="in_memory"))
+        result = save_session_summary(store, self._make_messages(), self._mock_config())
+        assert result is None
+        assert mock_chat_cls.return_value.invoke.call_count == 3
+
+    @patch("langchain_openai.ChatOpenAI")
+    def test_llm_returns_empty_then_succeeds(self, mock_chat_cls):
+        """Retry: first call empty, second call returns content."""
+        empty_resp = MagicMock()
+        empty_resp.content = ""
+        ok_resp = MagicMock()
+        ok_resp.content = "用户喜欢蓝色"
+        mock_chat_cls.return_value.invoke.side_effect = [empty_resp, ok_resp]
+
+        store = create_store(MemoryConfig(type="in_memory"))
+        result = save_session_summary(store, self._make_messages(), self._mock_config())
+        assert result == "用户喜欢蓝色"
+        assert mock_chat_cls.return_value.invoke.call_count == 2
+
+    @patch("langchain_openai.ChatOpenAI")
+    def test_llm_raises_then_succeeds(self, mock_chat_cls):
+        """Retry: first call raises exception, second call succeeds."""
+        ok_resp = MagicMock()
+        ok_resp.content = "摘要内容"
+        mock_chat_cls.return_value.invoke.side_effect = [
+            RuntimeError("API error"),
+            ok_resp,
+        ]
+
+        store = create_store(MemoryConfig(type="in_memory"))
+        result = save_session_summary(store, self._make_messages(), self._mock_config())
+        assert result == "摘要内容"
+
+    @patch("langchain_openai.ChatOpenAI")
+    def test_llm_returns_list_content(self, mock_chat_cls):
+        """Handle response.content being a list of content blocks."""
+        mock_response = MagicMock()
+        mock_response.content = [
+            {"type": "text", "text": "用户偏好：蓝色"},
+        ]
+        mock_chat_cls.return_value.invoke.return_value = mock_response
+
+        store = create_store(MemoryConfig(type="in_memory"))
+        result = save_session_summary(store, self._make_messages(), self._mock_config())
+        assert result == "用户偏好：蓝色"
+
+    @patch("langchain_openai.ChatOpenAI")
+    def test_llm_all_raise_returns_none(self, mock_chat_cls):
+        """If LLM raises on every attempt, returns None."""
+        mock_chat_cls.return_value.invoke.side_effect = RuntimeError("fail")
+
+        store = create_store(MemoryConfig(type="in_memory"))
+        result = save_session_summary(store, self._make_messages(), self._mock_config())
+        assert result is None
+        assert mock_chat_cls.return_value.invoke.call_count == 3
+
+    def test_roundtrip_with_postgres(self):
+        """End-to-end: save summary to PostgresStore with vector index, then load."""
+        store = create_store(self._pg_config())
+
+        # Directly store to bypass LLM call (LLM reliability is tested above)
+        store.put(
+            SESSION_SUMMARY_NAMESPACE,
+            SESSION_SUMMARY_KEY,
+            {"content": "用户喜欢蓝色和星街彗星", "message_count": 2, "timestamp": 1000.0},
+        )
+
+        loaded = load_session_summary(store)
+        assert loaded == "用户喜欢蓝色和星街彗星"
+
+        store.delete(SESSION_SUMMARY_NAMESPACE, SESSION_SUMMARY_KEY)
+
+    def test_load_missing_returns_none(self):
+        store = create_store(self._pg_config())
+        result = load_session_summary(store)
+        assert result is None

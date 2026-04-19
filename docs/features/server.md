@@ -130,7 +130,7 @@ if prev_summary:
 流程：
 1. 从 `checkpointer.get_tuple()` 获取对话历史
 2. 提取 messages
-3. 调用 `save_session_summary(store, messages, config)`
+3. 调用 `save_session_summary(store, messages, config)`（内置 3 次重试机制）
 4. 返回摘要内容
 
 ## 启动参数

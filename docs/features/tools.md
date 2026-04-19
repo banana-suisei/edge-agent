@@ -128,33 +128,33 @@ _form_events: dict[str, asyncio.Event] = {}  # form_id → Event
 
 ## Memory Tools
 
-长期记忆工具，通过 `runtime.store` 读写 PostgresStore。这是 Agent 运行时写入长期记忆的唯一入口。
+长期记忆工具，通过 `runtime.store` 读写 PostgresStore（含向量索引）。使用固定命名空间 `("users", "default")`，不暴露 namespace 参数给 LLM。
 
-| 工具 | 功能 | store 操作 | HITL 审批 |
-|------|------|-----------|----------|
-| `save_memory` | 保存记忆（key 为英文关键词） | `store.put(namespace, key, {"content": value})` | 自动通过 |
-| `search_memory` | 搜索记忆（query 为英文关键词） | `store.search(namespace, query=query)` | 自动通过 |
-| `get_memory` | 按 key 精确获取 | `store.get(namespace, key)` | 自动通过 |
-| `delete_memory` | 按 key 精确删除 | `store.delete(namespace, key)` | 自动通过 |
+| 工具 | 功能 | store 操作 |
+|------|------|-----------|
+| `save_memory` | 保存记忆 | `store.put(namespace, key, {"content": value})` |
+| `search_memory` | 语义搜索记忆 | `store.search(namespace, query=query, limit=10)` |
+| `get_memory` | 按 key 精确获取 | `store.get(namespace, key)` |
+| `delete_memory` | 按 key 精确删除 | `store.delete(namespace, key)` |
 
-### 关键词设计
+### 向量语义搜索
 
-`key` 和 `query` 参数均使用英文关键词以提高跨语言召回率：
+`search_memory` 不再使用关键词匹配，而是通过 pgvector 做向量语义搜索：
 
 ```python
-# 保存时
-save_memory(namespace="users/default", key="python,data-analysis,preference", value="用户喜欢用Python做数据分析")
+# 保存时 — store 自动为 value["content"] 生成 embedding 向量
+save_memory(key="favorite-vtubers", value="星街彗星、白上吹雪、神乐七奈")
 
-# 搜索时
-search_memory(namespace="users/default", query="programming data analysis")
+# 搜索时 — query 被 embedding 后与存储的向量做余弦相似度匹配
+search_memory(query="喜欢的虚拟主播")
 ```
 
 ### 会话摘要函数（非 @tool）
 
 `memory.py` 还提供两个应用层函数，由 CLI/Server 直接调用：
 
-- `save_session_summary(store, messages, config)` — 生成对话摘要，写入 `("sessions",) / "latest"`
-- `load_session_summary(store)` — 读取上次摘要
+- `save_session_summary(store, messages, config)` — 生成对话摘要（含重试机制），写入 `("sessions",) / "latest"`
+- `load_session_summary(store)` — 读取上次摘要（直接 key 查找，不走向量搜索）
 
 详见 [memory.md](memory.md)。
 
@@ -178,4 +178,5 @@ search_memory(namespace="users/default", query="programming data analysis")
 | LLM 返回非 JSON | `_generate_form_sync()` 的 markdown fence 剥离逻辑 |
 | 表单提交后 tool 无响应 | `submit_form()` 是否正确调用 `event.set()` |
 | 表单超时 | 检查 `timeout` 参数和 `config.form.default_timeout` |
-| 记忆搜索无结果 | key/query 是否使用英文关键词 |
+| 记忆搜索无结果 | embedding 配置是否正确、pgvector 是否安装、dims 是否匹配模型输出 |
+| 会话摘要内容为空 | 内置 3 次重试机制；检查 LLM 是否可用 |

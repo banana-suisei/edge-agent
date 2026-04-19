@@ -64,7 +64,7 @@ CLI 模式下 `HumanInTheLoopMiddleware` 同样生效。`_handle_cli_hitl()` 先
 
 自动审批通过 `_should_auto_approve(config, tool_name, tool_args)` 实现，与 HTTP 模式的 `ApprovalHandler.should_auto_approve()` 共享相同的正则匹配逻辑和 `config.yaml` 规则。
 
-记忆工具（save_memory / search_memory / get_memory / delete_memory）已配置 `auto_approve: .*`，在 CLI 下自动通过，无需人工确认。
+记忆工具（save_memory / search_memory / get_memory / delete_memory）如需自动通过，需在 `config.yaml` 的 `hitl.auto_approve` 中配置对应规则。
 
 ### WSL2 编码处理
 

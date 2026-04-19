@@ -15,7 +15,7 @@
 | `model` | `ModelConfig` | LLM 连接参数 |
 | `agent` | `AgentConfig` | Agent 行为参数 |
 | `mcp` | `McpConfig` | MCP 配置文件路径 |
-| `memory` | `MemoryConfig` | 记忆后端类型 + PostgreSQL 连接参数 |
+| `memory` | `MemoryConfig` | 记忆后端类型 + PostgreSQL 连接参数 + Embedding 配置 |
 | `server` | `ServerConfig` | HTTP 服务参数 |
 | `hitl` | `HitlConfig` | 自动审批规则列表 |
 | `form` | `FormConfig` | 表单工具超时 |
@@ -55,11 +55,19 @@ memory:
     password: "postgres"     # 密码（支持特殊字符，自动 URL 编码）
     database: "plush_agent"  # 数据库名
     sslmode: "disable"       # SSL 模式：disable / prefer / require
+  embedding:
+    base_url: "https://api.openai.com/v1"   # Embedding API 地址（OpenAI 兼容）
+    api_key_env: "OPENAI_API_KEY"            # 环境变量名，或直接填写 API key 值
+    model_name: "text-embedding-3-small"     # Embedding 模型名
+    dims: 1536                               # 向量维度（需匹配模型输出）
+    distance_type: "cosine"                  # 距离度量：cosine / l2 / inner_product
 ```
 
 `PostgresConfig.connection_string` 属性自动拼接为 PostgreSQL 连接串，user/password 通过 `urllib.parse.quote_plus` 编码以处理特殊字符（如 `@`、`:`）。
 
-当 `type` 为 `"in_memory"` 时忽略 `postgres` 配置，使用 `InMemoryStore`。
+`EmbeddingConfig` 配置向量搜索的 Embeddings 模型。`api_key` property 与 `ModelConfig.api_key` 行为一致：先从环境变量查找，不存在则将 `api_key_env` 值本身作为 API key。
+
+当 `type` 为 `"in_memory"` 时忽略 `postgres` 和 `embedding` 配置，使用 `InMemoryStore`。
 
 ## HitlConfig
 

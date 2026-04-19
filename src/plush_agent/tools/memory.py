@@ -126,15 +126,35 @@ def save_session_summary(store, messages: list, config) -> str | None:
         max_tokens=512,
     )
 
-    response = llm.invoke([
+    prompt = [
         SystemMessage(content="你是一个对话摘要助手。请用简洁的要点形式总结对话中的关键信息。"),
         HumanMessage(content=(
             "请总结以下对话的关键信息，包括用户需求、结论、重要偏好和上下文：\n\n"
             + text
         )),
-    ])
+    ]
 
-    summary = response.content
+    max_retries = 3
+    summary = ""
+    for attempt in range(max_retries):
+        try:
+            response = llm.invoke(prompt)
+            raw = response.content
+            if isinstance(raw, list):
+                raw = "\n".join(
+                    block.get("text", "") for block in raw
+                    if isinstance(block, dict) and block.get("type") == "text"
+                )
+            summary = raw.strip() if isinstance(raw, str) else str(raw).strip()
+            if summary:
+                break
+        except Exception:
+            if attempt == max_retries - 1:
+                return None
+            time.sleep(1)
+
+    if not summary:
+        return None
 
     store.put(
         SESSION_SUMMARY_NAMESPACE,
