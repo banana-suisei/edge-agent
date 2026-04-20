@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Callable
+from collections.abc import Awaitable, Callable
 
 from langchain.agents.middleware import AgentMiddleware, ModelRequest, ModelResponse
 from langchain.messages import SystemMessage
@@ -47,14 +47,9 @@ class SkillMiddleware(AgentMiddleware):
         self._loader = loader
         self._skills_prompt = loader.skill_descriptions_text()
 
-    def wrap_model_call(
-        self,
-        request: ModelRequest,
-        handler: Callable[[ModelRequest], ModelResponse],
-    ) -> ModelResponse:
+    def _inject_skills_prompt(self, request: ModelRequest) -> ModelRequest:
         if not self._skills_prompt:
-            return handler(request)
-
+            return request
         addendum = _sanitize_surrogates(
             "\n\n## Available Skills\n\n"
             f"{self._skills_prompt}\n\n"
@@ -65,4 +60,18 @@ class SkillMiddleware(AgentMiddleware):
             {"type": "text", "text": addendum},
         ]
         new_system = SystemMessage(content=new_content)
-        return handler(request.override(system_message=new_system))
+        return request.override(system_message=new_system)
+
+    def wrap_model_call(
+        self,
+        request: ModelRequest,
+        handler: Callable[[ModelRequest], ModelResponse],
+    ) -> ModelResponse:
+        return handler(self._inject_skills_prompt(request))
+
+    async def awrap_model_call(
+        self,
+        request: ModelRequest,
+        handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
+    ) -> ModelResponse:
+        return await handler(self._inject_skills_prompt(request))

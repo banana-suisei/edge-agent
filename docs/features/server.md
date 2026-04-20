@@ -16,8 +16,10 @@ plush-agent serve
     → run_server(config)
       → build_agent(config) → agent, store, checkpointer
       → ApprovalHandler(agent, config)
+      → StreamingApprovalHandler(agent, config)
       → create_app() → FastAPI 实例
       → app.state.approval_handler = handler
+      → app.state.streaming_approval_handler = streaming_handler
       → app.state.store = store
       → app.state.checkpointer = checkpointer
       → app.state.config = config
@@ -28,7 +30,8 @@ plush-agent serve
 
 | 属性 | 类型 | 用途 |
 |------|------|------|
-| `approval_handler` | `ApprovalHandler` | HITL 审批处理 |
+| `approval_handler` | `ApprovalHandler` | HITL 审批处理（阻塞模式） |
+| `streaming_approval_handler` | `StreamingApprovalHandler` | HITL 审批处理（SSE 流式模式） |
 | `store` | `BaseStore` | 长期记忆读写 |
 | `checkpointer` | `InMemorySaver` | 获取对话历史（会话摘要） |
 | `config` | `Config` | LLM 配置（摘要生成） |
@@ -60,6 +63,29 @@ FastAPI 自动生成 `/docs`（Swagger UI）和 `/redoc`（ReDoc）文档。
   "thread_id": "optional-thread-id"
 }
 ```
+
+**流式响应（SSE）：**
+
+在请求头中设置 `X-Stream: true` 或 `Accept: text/event-stream` 即可启用流式响应。服务端返回 `text/event-stream`，事件格式如下：
+
+| 事件类型 | 说明 | 数据示例 |
+|----------|------|----------|
+| `token` | LLM 生成的文本片段 | `{"content": "你好"}` |
+| `tool_call` | LLM 决定调用工具（完整参数） | `{"name": "terminal", "args": {"commands": "ls"}, "id": "c1"}` |
+| `tool_result` | 工具执行结果 | `{"name": "terminal", "content": "file1\nfile2"}` |
+| `interrupt` | HITL 审批中断 | `{"approval_id": "uuid", "pending_actions": [...], "auto_approved_count": 0}` |
+| `done` | 流式输出结束 | `{"content": ""}` |
+| `error` | 发生错误 | `{"message": "RuntimeError: ..."}` |
+
+```bash
+# 流式请求示例
+curl -N -X POST http://localhost:8000/api/chat \
+  -H "Content-Type: application/json" \
+  -H "X-Stream: true" \
+  -d '{"message": "hello"}'
+```
+
+审批恢复也支持流式，在 `POST /api/approvals/{id}/decide` 中同样设置 `X-Stream: true` 即可。
 
 **新 thread 摘要注入：**
 
@@ -153,3 +179,5 @@ plush-agent --config prod.yaml serve     # 指定配置文件
 | `UnicodeEncodeError: surrogates not allowed` | `routes_chat.py` 中 `_sanitize_surrogates()` 清理输入 |
 | 摘要未注入 | 检查 checkpointer 返回值和 store 中 "latest" 数据 |
 | /chat/end 返回 no_conversation | thread_id 是否正确，对话是否已发生 |
+| SSE 流无事件返回 | 检查请求头 `X-Stream: true`，检查 `streaming_approval_handler` 是否注册 |
+| 流式审批恢复无输出 | `POST /api/approvals/{id}/decide` 需设置 `X-Stream: true` |

@@ -12,17 +12,23 @@
 
 ```bash
 plush-agent chat
+plush-agent chat --stream
 plush-agent --config my-config.yaml chat
 ```
+
+`--stream` 启用流式输出：LLM 生成的 token 实时打印到终端，无需等待完整响应。
 
 流程：
 1. 加载配置文件
 2. `build_agent(config)` 创建 agent（含 `HumanInTheLoopMiddleware`）
 3. `load_session_summary(store)` 加载上次对话摘要（如有）
 4. 使用固定 `thread_id = "cli-session"` 维持对话上下文
-5. 循环读取用户输入，`_sanitize_surrogates()` 清理编码后，`agent.invoke(version="v2")` 获取回复
-6. 如果产生 interrupt → `_handle_cli_hitl()` 处理（含自动审批）
-7. `_print_reply()` 从 `GraphOutput.value` 中提取最后一条 AI 消息
+5. 循环读取用户输入，`_sanitize_surrogates()` 清理编码后发送给 agent
+6. **阻塞模式**：`agent.invoke(version="v2")` 获取回复，`_handle_cli_hitl()` 处理中断，`_print_reply()` 显示
+7. **流式模式** (`--stream`)：`_stream_cli()` 使用 `agent.astream(stream_mode=["messages","updates"])` 实时输出 token
+   - HITL 中断检测：`__interrupt__` 位于 `updates` chunk 的 `data` 顶层键
+   - 自动审批：匹配规则的工具自动通过，循环调用 `astream(Command(resume=...))` 继续流式输出
+   - 人工审批：中断流式输出，回退到 `_handle_cli_hitl()` 同步处理后续
 8. 输入 `/quit` 或 Ctrl+C/EOF 退出
 9. 退出前 `save_session_summary()` 保存对话摘要到 store
 
@@ -117,3 +123,5 @@ plush-agent serve --help
 | `UnicodeEncodeError: surrogates not allowed` | WSL2 中文输入编码问题，`_sanitize_surrogates()` 已处理 |
 | 记忆工具仍需手动审批 | 检查 `config.yaml` 中 `hitl.auto_approve` 是否包含记忆工具 |
 | 上次对话摘要未加载 | 检查 store 中 `("sessions",) / "latest"` 是否有数据 |
+| 流式模式工具调用后无回复 | `_stream_cli()` 中 `__interrupt__` 检测或自动审批 resume 逻辑 |
+| `awrap_model_call` NotImplementedError | `SkillMiddleware` 需要 async 版本支持 `astream()` |

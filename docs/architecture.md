@@ -20,10 +20,10 @@ Plush-Agent 是一个基于 LangChain 的 ReAct Agent，使用 OpenAI 接口标�
 ┌─────────────────────────────────────────────────────────┐
 │                   Agent 编排层                            │
 │                                                         │
-│  ┌──────────────┐  ┌────────────┐  ┌────────────────┐  │
-│  │ ApprovalHandler│  │ create_agent │  │ InMemorySaver │  │
-│  │ (HITL 自动审批)│  │ (ReAct 循环)│  │ (Checkpointer)│  │
-│  └──────┬───────┘  └──────┬─────┘  └────────────────┘  │
+│  ┌──────────────┐  ┌────────────────────┐  ┌────────────────┐  │
+│  │ ApprovalHandler│  │StreamingApprovalHandler│  │ InMemorySaver │  │
+│  │ (HITL 自动审批)│  │ (SSE 流式审批)     │  │ (Checkpointer)│  │
+│  └──────┬───────┘  └──────┬─────────────┘  └────────────────┘  │
 │         │                 │                              │
 │  ┌──────┴─────────────────┴─────────────────────────┐   │
 │  │              Middleware Pipeline                  │   │
@@ -90,7 +90,8 @@ plush-agent/
 │   ├── memory/
 │   │   └── store.py                  # Store 工厂 (PostgresStore / InMemoryStore)
 │   ├── hitl/
-│   │   └── approval_handler.py       # HITL 自动审批 + HTTP 桥接
+│   │   ├── approval_handler.py       # HITL 自动审批 + HTTP 桥接
+│   │   └── streaming_handler.py      # SSE 流式审批处理
 │   └── server/
 │       ├── app.py                    # FastAPI 应用工厂
 │       ├── main.py                   # uvicorn 启动入口
@@ -102,7 +103,41 @@ plush-agent/
 
 ## 核心数据流
 
-### 1. 聊天请求流
+### 1a. 聊天请求流（阻塞模式）
+
+```
+用户消息 → FastAPI /api/chat
+         → ApprovalHandler.run_with_hitl()
+           → agent.ainvoke(messages, config, version="v2")
+             → SkillMiddleware 注入 skill 描述到 system prompt
+             → LLM 生成回复 (可能包含 tool_calls)
+             → HumanInTheLoopMiddleware 拦截所有 tool_calls
+               (interrupt_on={tool_name: True}，所有工具默认拦截)
+           ← GraphOutput (含 .interrupts)
+         → _process_interrupt() 解析 action_requests + review_configs
+         → should_auto_approve() 正则匹配 tool name + args
+         → 全部自动通过 → resume → _extract_done() 返回结果
+         → 需要人工 → 返回 pending_approval 等待 HTTP 决策
+```
+
+### 1b. 聊天请求流（SSE 流式模式）
+
+```
+用户消息 → FastAPI /api/chat (X-Stream: true)
+         → EventSourceResponse(streaming_handler.run_streaming())
+           → agent.astream(messages, stream_mode=["messages","updates"], version="v2")
+             → messages chunk → yield SSE token / tool_call 事件
+             → updates chunk (tools) → yield SSE tool_result 事件
+             → updates chunk (__interrupt__) → _handle_interrupt():
+               → 全部自动通过 → 内部 resume streaming → 继续输出
+               → 需要人工 → yield SSE interrupt 事件 → 流结束
+
+审批恢复 (X-Stream: true):
+POST /api/approvals/{id}/decide
+         → EventSourceResponse(streaming_handler.submit_decision_streaming())
+           → agent.astream(Command(resume=decisions), ...)
+           → 继续流式输出后续 token / tool_call / tool_result 事件
+```
 
 ```
 用户消息 → FastAPI /api/chat
@@ -200,6 +235,7 @@ cli.py → config.py
 
 server/main.py → agent.py
                → hitl/approval_handler.py
+               → hitl/streaming_handler.py
                → server/app.py
 
 agent.py → config.py
@@ -212,7 +248,9 @@ hitl/approval_handler.py → config.py
                           (依赖 agent 实例，不依赖具体 agent 构建逻辑)
 
 server/routes_chat.py → hitl/approval_handler.py
+                      → hitl/streaming_handler.py
                       → tools/memory.py (save_session_summary, load_session_summary)
+server/routes_approval.py → hitl/streaming_handler.py
 server/routes_*.py → tools/form.py
 ```
 
@@ -223,6 +261,7 @@ server/routes_*.py → tools/form.py
 | Agent 框架 | LangChain `create_agent` | 官方 ReAct 实现，内置 middleware/tool 支持 |
 | HITL 实现 | 官方 `HumanInTheLoopMiddleware` | 不手动实现 interrupt，交给 SDK 管理状态 |
 | 自动审批 | CLI 和 HTTP 双路径实现 | `_should_auto_approve()` 在 CLI 层，`ApprovalHandler` 在 HTTP 层，共享同一正则匹配逻辑 |
+| 流式响应 | 扩展 `ApprovalHandler` 为 `StreamingApprovalHandler` 子类 | 不修改基类，HTTP 流式通过 SSE (`sse-starlette`)，CLI 流式通过 `--stream` 参数启用 `astream()` |
 | Skills 格式 | agentskills.io 规范 | 开放标准，SKILL.md 可读、可审计、易分享 |
 | 表单等待 | `asyncio.Event` + 内存 store | 简单可靠，单进程部署足够 |
 | 长期记忆存储 | PostgreSQL + pgvector (PostgresStore + OpenAIEmbeddings) | 生产级持久化，跨进程共享，原生向量语义搜索支持 |

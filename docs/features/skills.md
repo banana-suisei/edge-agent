@@ -74,11 +74,19 @@ class SkillLoader:
 class SkillMiddleware(AgentMiddleware):
     tools = [load_skill]  # 注册到 agent
 
+    def _inject_skills_prompt(self, request: ModelRequest) -> ModelRequest:
+        # 在 system prompt 末尾追加 skill 描述列表（共享逻辑）
+
     def wrap_model_call(self, request, handler) -> ModelResponse:
-        # 在 system prompt 末尾追加 skill 描述列表
+        # 同步路径：handler 是同步函数
+        return handler(self._inject_skills_prompt(request))
+
+    async def awrap_model_call(self, request, handler) -> ModelResponse:
+        # 异步路径：handler 是 async 函数
+        return await handler(self._inject_skills_prompt(request))
 ```
 
-`wrap_model_call` 在每次 LLM 调用前执行，将所有 skill 的 name+description 追加到 system message 的 content blocks 中。追加的文本会通过 `_sanitize_surrogates()` 清理，防止代理字符污染 API 请求。
+`wrap_model_call` 和 `awrap_model_call` 在每次 LLM 调用前执行，将所有 skill 的 name+description 追加到 system message 的 content blocks 中。两者共享 `_inject_skills_prompt()` 逻辑。异步版本 (`awrap_model_call`) 是必须的——使用 `astream()` 或 `ainvoke()` 时 LangGraph 调用 async 版本，未实现会抛出 `NotImplementedError`。追加的文本会通过 `_sanitize_surrogates()` 清理，防止代理字符污染 API 请求。
 
 ## load_skill tool
 

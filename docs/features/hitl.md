@@ -4,9 +4,10 @@
 
 - `src/plush_agent/agent.py` — `build_agent()` 配置 `HumanInTheLoopMiddleware`
 - `src/plush_agent/hitl/approval_handler.py` — `ApprovalHandler` + `PendingApproval`
-- `src/plush_agent/server/routes_approval.py` — HTTP 审批接口
-- `src/plush_agent/server/routes_chat.py` — 通过 ApprovalHandler 调用 agent
-- `src/plush_agent/cli.py` — CLI 模式 HITL 交互审批（含 `_should_auto_approve`）
+- `src/plush_agent/hitl/streaming_handler.py` — `StreamingApprovalHandler`（继承 `ApprovalHandler`）
+- `src/plush_agent/server/routes_approval.py` — HTTP 审批接口（含 SSE 流式支持）
+- `src/plush_agent/server/routes_chat.py` — 通过 ApprovalHandler 调用 agent（含 SSE 流式支持）
+- `src/plush_agent/cli.py` — CLI 模式 HITL 交互审批（含 `_should_auto_approve`、`_stream_cli`）
 
 ## 架构
 
@@ -156,6 +157,66 @@ def _handle_cli_hitl(agent, result, cfg, config: Config):
 
 `_should_auto_approve()` 与 `ApprovalHandler.should_auto_approve()` 逻辑一致，共享 `config.yaml` 中的 `hitl.auto_approve` 规则。
 
+## StreamingApprovalHandler（SSE 流式审批）
+
+`StreamingApprovalHandler` 继承自 `ApprovalHandler`，复用基类的 `should_auto_approve()` 和 `_process_interrupt()` 逻辑，使用 `agent.astream()` 替代 `agent.ainvoke()` 执行。
+
+### 核心方法
+
+| 方法 | 说明 |
+|------|------|
+| `run_streaming(message, thread_id)` | 流式执行 agent，yield SSE 事件 dict |
+| `submit_decision_streaming(approval_id, decisions)` | 流式恢复审批，yield SSE 事件 dict |
+| `_stream_agent(input, config, tool_call_acc)` | 内部流式循环，处理 messages/updates chunks |
+| `_handle_interrupt(interrupts, config, tool_call_acc)` | 处理 interrupt，自动审批则内部 resume，需人工则 yield interrupt 事件 |
+
+### SSE 事件类型（SSEEventType 枚举）
+
+| 事件 | 触发时机 | 数据结构 |
+|------|----------|----------|
+| `token` | LLM 生成文本片段 | `{"content": "..."}` |
+| `tool_call` | 工具调用完成（参数累积后） | `{"name": "...", "args": {...}, "id": "..."}` |
+| `tool_result` | 工具执行完成 | `{"name": "...", "content": "..."}` |
+| `interrupt` | HITL 需人工审批 | `{"approval_id": "...", "pending_actions": [...], "auto_approved_count": N}` |
+| `done` | 流式输出正常结束 | `{"content": ""}` |
+| `error` | 发生异常 | `{"message": "..."}` |
+
+### Interrupt 检测
+
+LangGraph v2 流式中，`__interrupt__` 作为 `updates` chunk 的 `data` 顶层键出现：
+
+```python
+# chunk 格式
+{"type": "updates", "data": {"__interrupt__": (Interrupt(...),)}}
+
+# 检测逻辑（必须在遍历 node outputs 之前检查）
+if "__interrupt__" in update_data:
+    interrupts = update_data["__interrupt__"]
+    # 处理 interrupt...
+```
+
+### 自动审批的内部恢复
+
+当所有 action 都匹配自动审批规则时，handler 内部递归调用 `_stream_agent(Command(resume=decisions), ...)` 继续流式输出，不向客户端发送 interrupt 事件。客户端看到无缝的 token 流。
+
+### 工具调用累积
+
+LLM 的 `tool_call_chunks` 以 JSON 片段形式分多次到达。handler 在 `tool_call_acc` dict 中按 tool call ID 累积片段，当工具执行结果到达时（`tool_result` update），一次性解析完整参数并 yield `tool_call` 事件。因此 `tool_call` 事件总是在 `tool_result` 事件之前。
+
+### 独立的 pending 存储
+
+`StreamingApprovalHandler` 使用自己的 `self.streaming_pending` dict，与基类的 `self.pending` 分离。这是因为阻塞模式和流式模式的 pending 审批由不同的 handler 管理。
+
+### CLI 流式 HITL
+
+CLI 的 `_stream_cli()` 使用 `while True` 循环结构：
+
+1. `agent.astream(stream_mode=["messages","updates"])` 流式输出 token
+2. 检测到 `__interrupt__` → break 退出内层 async for
+3. 自动审批的 action 直接 approve
+4. 全部自动审批 → `stream_input = Command(resume=decisions)`，回到 while 循环继续流式输出
+5. 需人工审批 → 回退到 `_handle_cli_hitl()` 同步处理剩余流程
+
 ## PendingApproval 数据模型
 
 ```python
@@ -264,7 +325,7 @@ return result  # 始终是结构化 dict，直接返回
 
 ## 测试
 
-`tests/test_hitl.py` 覆盖以下场景：
+`tests/test_hitl.py` 覆盖阻塞模式场景：
 
 | 测试类 | 测试内容 |
 |--------|----------|
@@ -273,6 +334,15 @@ return result  # 始终是结构化 dict，直接返回
 | `TestRunWithHitl` | 无中断、全自动审批、需要人工 |
 | `TestSubmitDecision` | 提交后完成、不存在审批 |
 | `TestPendingManagement` | 空列表、查询不存在 |
+
+`tests/test_streaming_handler.py` 覆盖流式模式场景：
+
+| 测试类 | 测试内容 |
+|--------|----------|
+| `TestStreamingTokens` | 单 token、多 token、空流 |
+| `TestStreamingToolCalls` | tool_call 累积 + tool_result 事件顺序 |
+| `TestStreamingHITL` | 自动审批内部恢复、人工审批 interrupt 事件、不存在的审批 |
+| `TestStreamingErrors` | 异常时 yield error 事件 |
 
 ## 调试定位
 
@@ -287,3 +357,7 @@ return result  # 始终是结构化 dict，直接返回
 | KeyError: 'arguments' | ActionRequest 使用 `args` 不是 `arguments` |
 | 工具直接执行无审批 | 检查 `HumanInTheLoopMiddleware` 是否在 middleware 列表中 |
 | 新工具绕过审批 | 检查 `interrupt_on` 是否包含该工具名 |
+| 流式模式工具无审批/interrupt | `_stream_cli()` 或 `_stream_agent()` 中 `__interrupt__` 检测 — 必须在遍历 `update_data.items()` 前检查顶层键 |
+| 流式模式工具调用后无回复 | 自动审批后未 resume streaming — 检查 `_stream_agent()` 或 `_stream_cli()` 的 while 循环是否正确设置 `stream_input = Command(resume=...)` |
+| SSE 流无事件返回 | 检查请求头 `X-Stream: true` 或 `Accept: text/event-stream`，检查 `app.state.streaming_approval_handler` 是否设置 |
+| `awrap_model_call` NotImplementedError | `SkillMiddleware` 需同时实现 `wrap_model_call` 和 `awrap_model_call` — 异步上下文（`astream`/`ainvoke`）需要 async 版本 |
