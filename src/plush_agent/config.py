@@ -98,6 +98,12 @@ class UdsConfig:
 
 
 @dataclass
+class ImageConfig:
+    url: str = "http://localhost:8080/image"
+    timeout: int = 30
+
+
+@dataclass
 class Config:
     model: ModelConfig = field(default_factory=ModelConfig)
     agent: AgentConfig = field(default_factory=AgentConfig)
@@ -107,6 +113,7 @@ class Config:
     hitl: HitlConfig = field(default_factory=HitlConfig)
     form: FormConfig = field(default_factory=FormConfig)
     uds: UdsConfig = field(default_factory=UdsConfig)
+    image: ImageConfig = field(default_factory=ImageConfig)
     robot_id: str = "robot-0"
 
 
@@ -188,6 +195,13 @@ def load_config(path: str | Path) -> Config:
         cfg.uds = UdsConfig(
             enabled=u.get("enabled", cfg.uds.enabled),
             socket_path=u.get("socket_path", cfg.uds.socket_path),
+        )
+
+    if "image" in raw:
+        i = raw["image"]
+        cfg.image = ImageConfig(
+            url=i.get("url", cfg.image.url),
+            timeout=i.get("timeout", cfg.image.timeout),
         )
 
     return cfg

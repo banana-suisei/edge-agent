@@ -4,6 +4,7 @@
 
 - `src/plush_agent/tools/bash.py` — Bash/Shell 工具
 - `src/plush_agent/tools/form.py` — 表单生成工具 + HTTP 接口函数
+- `src/plush_agent/tools/image.py` — 图片获取工具
 - `src/plush_agent/tools/memory.py` — 长期记忆工具 + 会话摘要函数
 
 ## 工具注册
@@ -13,7 +14,7 @@
 ```python
 from plush_agent.tools.memory import memory_tools
 
-tools = [bash_tool, load_skill, create_form_generate_tool(config), *memory_tools]
+tools = [bash_tool, load_skill, create_form_generate_tool(config), *memory_tools, create_fetch_image_tool(config.image.url, config.image.timeout)]
 # + MCP tools (async loaded)
 ```
 
@@ -160,6 +161,53 @@ search_memory(query="喜欢的虚拟主播")
 
 ---
 
+## Image Tool (`fetch_image`)
+
+### 工厂模式
+
+`create_fetch_image_tool(url, timeout)` 返回闭包 tool，捕获配置中的 HTTP 端点地址和超时时间。
+
+### Tool 签名
+
+```python
+@tool
+def fetch_image(runtime: ToolRuntime) -> Command:
+```
+
+无业务参数 — 调用 `config.image.url` 固定接口获取当前图片。
+
+### 执行流程
+
+```
+1. requests.get(url, timeout=timeout) 获取图片
+2. 图片二进制转 base64 编码
+3. 返回 Command(update={"messages": [...]})：
+   - ToolMessage: 文本确认（含 URL、MIME 类型、大小）
+   - HumanMessage: image content blocks（LangChain 标准 ImageContentBlock）
+4. LangGraph 将 HumanMessage 注入对话状态 → LLM (VL模型) 直接处理图片
+```
+
+### 多模态消息格式
+
+使用 LangChain 标准 `ImageContentBlock`：
+
+```python
+HumanMessage(content=[
+    {"type": "text", "text": "[Image from local service]"},
+    {"type": "image", "base64": "<base64_data>", "mime_type": "image/jpeg"},
+])
+```
+
+### 配置
+
+```yaml
+image:
+  url: "http://localhost:8080/image"  # 本地图片服务端点
+  timeout: 30                          # HTTP 请求超时（秒）
+```
+
+---
+
 ## 扩展指南
 
 添加新 tool：
@@ -180,3 +228,4 @@ search_memory(query="喜欢的虚拟主播")
 | 表单超时 | 检查 `timeout` 参数和 `config.form.default_timeout` |
 | 记忆搜索无结果 | embedding 配置是否正确、pgvector 是否安装、dims 是否匹配模型输出 |
 | 会话摘要内容为空 | 内置 3 次重试机制；检查 LLM 是否可用 |
+| 图片获取失败 | 检查 `config.image.url` 是否可达、服务是否启动、超时是否过短 |
