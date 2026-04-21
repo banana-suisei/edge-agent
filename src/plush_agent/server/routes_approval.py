@@ -17,13 +17,50 @@ class DecideRequest(BaseModel):
 @router.get("/approvals")
 async def list_approvals(request: Request):
     handler = request.app.state.approval_handler
-    return handler.list_pending()
+    streaming_handler = request.app.state.streaming_approval_handler
+    result = handler.list_pending()
+    # Include streaming-mode pending approvals (keyed by thread_id in a separate dict)
+    for p in streaming_handler.streaming_pending.values():
+        actions = []
+        for idx in p.needs_human_indices:
+            a = p.action_requests[idx]
+            actions.append({
+                "name": a["name"],
+                "args": a["args"],
+                "description": a.get("description", ""),
+            })
+        result.append({
+            "approval_id": p.approval_id,
+            "pending_actions": actions,
+            "auto_approved_count": len(p.action_requests) - len(p.needs_human_indices),
+            "created_at": p.created_at,
+        })
+    return result
 
 
 @router.get("/approvals/{approval_id}")
 async def get_approval(approval_id: str, request: Request):
     handler = request.app.state.approval_handler
     result = handler.get_pending(approval_id)
+    if result is None:
+        streaming_handler = request.app.state.streaming_approval_handler
+        for p in streaming_handler.streaming_pending.values():
+            if p.approval_id == approval_id:
+                actions = []
+                for idx in p.needs_human_indices:
+                    a = p.action_requests[idx]
+                    actions.append({
+                        "name": a["name"],
+                        "args": a["args"],
+                        "description": a.get("description", ""),
+                    })
+                result = {
+                    "approval_id": p.approval_id,
+                    "pending_actions": actions,
+                    "auto_approved_count": len(p.action_requests) - len(p.needs_human_indices),
+                    "created_at": p.created_at,
+                }
+                break
     if result is None:
         raise HTTPException(404, "审批请求不存在")
     return result

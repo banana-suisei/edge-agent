@@ -153,7 +153,7 @@ class StreamingApprovalHandler(ApprovalHandler):
 
         approval_id = str(uuid4())
         thread_id = config["configurable"]["thread_id"]
-        self.streaming_pending[thread_id] = PendingApproval(
+        pending = PendingApproval(
             approval_id=approval_id,
             thread_id=thread_id,
             config=config,
@@ -162,6 +162,7 @@ class StreamingApprovalHandler(ApprovalHandler):
             needs_human_indices=[i for i, _ in needs_human],
             interrupt_id=interrupt.id,
         )
+        self.streaming_pending[thread_id] = pending
 
         yield {
             "kind": "event",
