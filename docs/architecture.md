@@ -2,22 +2,25 @@
 
 ## 系统总览
 
-Plush-Agent 是一个基于 LangChain 的 ReAct Agent，使用 OpenAI 接口标准的基座模型。系统通过 FastAPI 提供 HTTP REST API，同时支持 CLI 交互。
+Plush-Agent 是一个基于 LangChain 的 ReAct Agent，使用 OpenAI 接口标准的基座模型。系统通过 FastAPI 提供 HTTP REST API，同时支持 CLI 交互和 UDS (Unix Domain Socket) 通道。
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                     用户交互层                           │
-│  ┌──────────┐              ┌──────────────────────────┐ │
-│  │   CLI    │              │   FastAPI HTTP Server     │ │
-│  │  (click) │              │  /api/chat/stream (SSE)   │ │
-│  │          │              │  /api/chat (POST)         │ │
-│  │          │              │  /api/chat/end            │ │
-│  │          │              │  /api/forms               │ │
-│  │          │              │  /api/approvals           │ │
-│  └────┬─────┘              └────────────┬─────────────┘ │
-└───────┼─────────────────────────────────┼───────────────┘
-        │                                 │
-        v                                 v
+┌───────────────────────────────────────────────────────────────┐
+│                        用户交互层                              │
+│  ┌──────────┐  ┌──────────────────────────┐  ┌────────────┐ │
+│  │   CLI    │  │   FastAPI HTTP Server     │  │  UDS Server│ │
+│  │  (click) │  │  /api/chat/stream (SSE)   │  │ JSON-Line  │ │
+│  │          │  │  /api/chat (POST)         │  │ 短连接协议  │ │
+│  │          │  │  /api/chat/end            │  │ getForms   │ │
+│  │          │  │  /api/forms               │  │ submitForm │ │
+│  │          │  │  /api/approvals           │  │ getPending │ │
+│  └────┬─────┘  └────────────┬─────────────┘  │ Approvals  │ │
+│       │                     │                 │ submitDeci-│ │
+│       │                     │                 │ sion       │ │
+│       │                     │                 └─────┬──────┘ │
+└───────┼─────────────────────┼───────────────────────┼────────┘
+        │                     │                       │
+        v                     v                       v
 ┌─────────────────────────────────────────────────────────┐
 │                   Agent 编排层                            │
 │                                                         │
@@ -32,6 +35,10 @@ Plush-Agent 是一个基于 LangChain 的 ReAct Agent，使用 OpenAI 接口标�
 │  │  (所有工具默认拦截，interrupt_on={tool:True})      │   │
 │  │  SkillMiddleware 仅注入 prompt，不注册 tools       │   │
 │  └──────────────────────────────────────────────────┘   │
+│                                                         │
+│  UDS Server (可选，通过 config.uds.enabled 启用)        │
+│  UdsServer 持有 approval_handler / streaming_handler    │
+│  引用，通过 asyncio.start_unix_server 监听 socket       │
 │                                                         │
 └──────────────────────────┬──────────────────────────────┘
                            │
@@ -95,12 +102,13 @@ plush-agent/
 │   │   ├── approval_handler.py       # HITL 自动审批 + HTTP 桥接
 │   │   └── streaming_handler.py      # SSE 流式审批处理
 │   └── server/
-│       ├── app.py                    # FastAPI 应用工厂
+│       ├── app.py                    # FastAPI 应用工厂（含 lifespan 管理 UDS 启停）
 │       ├── main.py                   # uvicorn 启动入口
 │       ├── session.py                # SessionManager（长连接 SSE 会话管理）
 │       ├── routes_chat.py            # /api/chat, /api/chat/stream, /api/chat/end
 │       ├── routes_form.py            # /api/forms
-│       └── routes_approval.py        # /api/approvals
+│       ├── routes_approval.py        # /api/approvals
+│       └── uds_server.py             # UDS 审批/表单通道（JSON-Line 协议）
 └── tests/
 ```
 
@@ -159,6 +167,41 @@ SSE 按 thread_id 建立长连接，通过 SessionManager + asyncio.Queue 桥接
    -> 取消后台 agent 任务
    -> save_session_summary() 保存摘要
    -> SessionManager.close() 清理资源
+```
+
+### 1c. UDS 审批/表单通道
+
+通过 Unix Domain Socket 暴露审批和表单接口，供边缘客户端（如 Rust edge）使用。协议为 JSON-Line 短连接（一次请求/响应）。需在 `config.yaml` 中启用 `uds.enabled: true`。
+
+```
+1. 服务启动:
+   config.uds.enabled == true
+   -> UdsServer 持有 approval_handler / streaming_handler / session_manager 引用
+   -> lifespan 启动 asyncio.start_unix_server(socket_path)
+   -> 清理旧 socket 文件
+
+2. 客户端查询审批:
+   连接 socket -> 发送 {"action": "getPendingApprovals", "interruptId": ""}
+   -> UdsServer._dispatch() -> _handle_get_pending_approvals()
+   -> 汇总 approval_handler.pending + streaming_handler.streaming_pending
+   -> 映射为 UDS 格式 [{interruptId, actionName, argsJson, allowedDecisions, ...}]
+   -> 返回 JSON-Line 响应 -> 关闭连接
+
+3. 客户端提交审批决策:
+   连接 socket -> 发送 {"action": "submitApprovalDecision", "interruptId": "xxx", "decision": "approve"}
+   -> UdsServer._dispatch() -> _handle_submit_approval_decision()
+   -> 查找 pending（streaming_handler 优先，再查 approval_handler）
+   -> 统一 decision 映射为内部 decisions 数组（每个 needs_human index 应用相同决策）
+   -> streaming 模式: submit_decision_streaming() -> 事件经 _sse_serialize() 推送到 SSE queue
+   -> blocking 模式: submit_decision() -> 直接返回
+   -> 返回 JSON-Line 响应 -> 关闭连接
+
+4. 表单查询/提交（robotId 校验）:
+   getForms -> get_pending_forms() -> 映射为 UDS forms 数组
+   submitForm -> submit_form(form_id, responses) -> 触发 asyncio.Event
+
+5. 服务关闭:
+   -> lifespan 关闭 UDS server -> 清理 socket 文件
 ```
 
 ### 2. 长期记忆流
@@ -268,9 +311,18 @@ server/main.py -> agent.py
                -> hitl/approval_handler.py
                -> hitl/streaming_handler.py
                -> server/app.py
+               -> server/uds_server.py (当 config.uds.enabled 时)
 
 server/app.py -> server/session.py (SessionManager)
               -> server/routes_*.py
+    lifespan 管理 UdsServer 启停（通过 app.state.uds_server）
+
+server/uds_server.py -> config.py
+                      -> hitl/approval_handler.py (ApprovalHandler, PendingApproval)
+                      -> hitl/streaming_handler.py (StreamingApprovalHandler)
+                      -> server/routes_chat.py (_sse_serialize)
+                      -> server/session.py (SessionManager)
+                      -> tools/form.py (get_pending_forms, get_form, submit_form)
 
 agent.py -> config.py
          -> skills/loader.py + skills/middleware.py
@@ -310,3 +362,7 @@ server/routes_*.py -> tools/form.py
 | 会话摘要 | 固定 key `"latest"` 写入 `("sessions",)` 命名空间 | CLI 和 HTTP 均通过 checkpointer 获取消息，不依赖运行时变量追踪 |
 | 记忆工具审批 | 自动通过（`auto_approve: .*`） | 记忆操作无安全风险，无需人工确认 |
 | MCP 加载 | JSON 文件 | MCP 的 MultiServerMCPClient 接受 dict，JSON 映射最直接 |
+| UDS 通道 | `asyncio.start_unix_server` + JSON-Line 短连接 | 无外部依赖，复用同一事件循环；审批/表单数据直接从 handler 和 form 模块读取 |
+| UDS 与 SSE 共享队列 | UDS `_consume_and_push` 使用 `_sse_serialize` 序列化后推入 SSE queue | UDS 提交 streaming 审批决策时，事件经 `_sse_serialize` 转为 `{event, data}` 格式，与 SSE 路由层一致，避免 `ServerSentEvent` 崩溃 |
+| UDS 审批语义 | 节点级（不过滤 robotId），表单语义为机器人级（robotId 校验） | 审批面向整个 agent 实例，表单面向特定机器人，与 mock 协议规范一致 |
+| UDS 决策映射 | 统一决策（单个 decision 应用到所有 needs_human action） | 简化边缘客户端逻辑，一个 UDS 决策覆盖整个 interrupt 的所有待审批 action |

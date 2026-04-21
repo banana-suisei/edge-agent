@@ -161,6 +161,7 @@ class StreamingApprovalHandler(ApprovalHandler):
             decisions=decisions,
             needs_human_indices=[i for i, _ in needs_human],
             interrupt_id=interrupt.id,
+            review_configs=review_configs,
         )
         self.streaming_pending[thread_id] = pending
 

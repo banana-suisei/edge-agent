@@ -2,12 +2,13 @@
 
 ## 文件
 
-- `src/plush_agent/server/app.py` — FastAPI 应用工厂
+- `src/plush_agent/server/app.py` — FastAPI 应用工厂（含 lifespan 管理 UDS 启停）
 - `src/plush_agent/server/main.py` — uvicorn 启动入口
 - `src/plush_agent/server/session.py` — SessionManager（长连接 SSE 会话管理）
 - `src/plush_agent/server/routes_chat.py` — `/api/chat`, `/api/chat/stream`, `/api/chat/end`
 - `src/plush_agent/server/routes_form.py` — `/api/forms`
 - `src/plush_agent/server/routes_approval.py` — `/api/approvals`
+- `src/plush_agent/server/uds_server.py` — UDS 审批/表单通道（JSON-Line 协议）
 
 ## 应用生命周期
 
@@ -25,7 +26,13 @@ plush-agent serve
       → app.state.store = store
       → app.state.checkpointer = checkpointer
       → app.state.config = config
+      → (if config.uds.enabled)
+        → UdsServer(config, handler, streaming_handler, session_manager)
+        → app.state.uds_server = uds
       → uvicorn.run(app, host, port)
+        → lifespan startup: uds_server.start() (创建 Unix socket)
+        → ... 运行 ...
+        → lifespan shutdown: uds_server.stop() (关闭并清理 socket)
 ```
 
 `app.state` 上的共享对象：
@@ -38,6 +45,7 @@ plush-agent serve
 | `store` | `BaseStore` | 长期记忆读写 |
 | `checkpointer` | `InMemorySaver` | 获取对话历史（会话摘要） |
 | `config` | `Config` | LLM 配置（摘要生成） |
+| `uds_server` | `UdsServer` (可选) | UDS 审批/表单通道（仅 `uds.enabled` 时存在） |
 
 ## 路由总览
 
@@ -201,3 +209,78 @@ plush-agent --config prod.yaml serve     # 指定配置文件
 | GET /api/approvals 返回空 | 确认路由同时查了 `approval_handler.pending` 和 `streaming_approval_handler.streaming_pending` |
 | SSE 断开后摘要未保存 | 检查 `_on_stream_disconnect` 日志 |
 | 新连接未踢掉旧连接 | `SessionManager.close()` 是否正确清理 |
+
+## UDS 审批/表单通道
+
+可选的 Unix Domain Socket 通道，供边缘客户端（如 Rust edge）查询审批和表单。通过 `config.yaml` 中 `uds.enabled` 控制启用。
+
+### 协议
+
+JSON-Line 短连接：客户端连接 socket，发送一行 JSON 请求，接收一行 JSON 响应，关闭连接。
+
+**协议版本**：`1`
+
+**请求格式**：
+```json
+{"action": "getPendingApprovals", "robotId": "robot-0", "interruptId": ""}
+```
+
+**响应信封**：
+```json
+{"version": 1, "action": "getPendingApprovals", "robotId": "robot-0", "timestamp": 1713686400, "success": true, ...}
+```
+
+错误响应增加 `"error"` 字段。
+
+### Actions
+
+| Action | 级别 | 说明 |
+|--------|------|------|
+| `getForms` | 机器人级 | 查询待填写表单，可选 `formId` 过滤，需 `robotId` 匹配 |
+| `submitForm` | 机器人级 | 提交表单数据 `{formId, responses}`，需 `robotId` 匹配 |
+| `getPendingApprovals` | 节点级 | 查询待审批操作，可选 `interruptId` 过滤，不过滤 `robotId` |
+| `submitApprovalDecision` | 节点级 | 提交审批决策 `{interruptId, decision, reason?, editedArgs?}`，不过滤 `robotId` |
+
+**机器人级** vs **节点级**：表单操作面向特定机器人，审批操作面向整个 agent 实例。
+
+### 审批数据映射
+
+内部 `PendingApproval` 映射为 UDS 格式：
+
+```json
+{
+  "interruptId": "approval-uuid",
+  "actionName": "terminal",
+  "description": "删除文件",
+  "argsJson": "{\"commands\": \"rm -rf /\"}",
+  "allowedDecisions": ["approve", "edit", "reject"],
+  "createdAt": 1713686400,
+  "reviewConfigJson": "[{\"action_name\": \"terminal\", \"allowed_decisions\": [...]}]"
+}
+```
+
+取第一个 `needs_human` action 的信息作为主字段。`allowedDecisions` 从 `review_configs` 中提取。
+
+### 决策映射
+
+UDS 单个 `decision`（approve/reject/edit）统一应用到该 `PendingApproval` 下所有 `needs_human` 的 action。
+
+| UDS decision | 内部映射 |
+|-------------|---------|
+| `approve` | `{"type": "approve"}` × N |
+| `reject` | `{"type": "reject", "message": reason}` × N |
+| `edit` | `{"type": "edit", "edited_action": {...}}` × N |
+
+### SSE 队列共享
+
+当 UDS 提交 streaming 模式的审批决策时，事件通过 `_sse_serialize()` 序列化后推入 SSE `asyncio.Queue`，与 HTTP 路由层行为一致。直接推入原始内部事件（含 `kind` key）会导致 `ServerSentEvent` 崩溃。
+
+### 配置
+
+```yaml
+robot_id: "robot-0"        # 机器人标识，用于表单操作的 robotId 校验
+
+uds:
+  enabled: false            # 是否启用 UDS 通道
+  socket_path: "/tmp/agent-gateway.sock"  # socket 文件路径
+```

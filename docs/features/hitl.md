@@ -7,6 +7,7 @@
 - `src/plush_agent/hitl/streaming_handler.py` — `StreamingApprovalHandler`（继承 `ApprovalHandler`）
 - `src/plush_agent/server/routes_approval.py` — HTTP 审批接口（含 SSE 流式支持）
 - `src/plush_agent/server/routes_chat.py` — 通过 ApprovalHandler 调用 agent（含 SSE 流式支持）
+- `src/plush_agent/server/uds_server.py` — UDS 审批/表单通道（JSON-Line 协议）
 - `src/plush_agent/cli.py` — CLI 模式 HITL 交互审批（含 `_should_auto_approve`、`_stream_cli`）
 
 ## 架构
@@ -37,13 +38,13 @@ HITL 分两层：
               │  - 不匹配 → 人工审批              │
               └──────────────┬───────────────────┘
                              │
-                    ┌────────┴────────┐
-                    ▼                 ▼
-              ┌───────────┐   ┌──────────────┐
-              │  HTTP 层   │   │   CLI 层      │
-              │  /api/     │   │ _handle_cli_  │
-              │  approvals │   │ hitl()        │
-              └───────────┘   └──────────────┘
+              ┌──────────────┼──────────────┐
+              ▼              ▼              ▼
+        ┌───────────┐ ┌──────────────┐ ┌──────────┐
+        │  HTTP 层   │ │   CLI 层      │ │  UDS 层   │
+        │  /api/     │ │ _handle_cli_  │ │ UdsServer │
+        │  approvals │ │ hitl()        │ │ JSON-Line │
+        └───────────┘ └──────────────┘ └──────────┘
 ```
 
 ## Middleware 注册
@@ -249,9 +250,12 @@ class PendingApproval:
     needs_human_indices: list[int] # 需要人工决策的索引位置
     interrupt_id: str             # LangGraph Interrupt.id，用于 resume 命令
     created_at: float             # 创建时间戳
+    review_configs: list[dict]    # review_configs（用于 UDS 通道映射 allowed_decisions）
 ```
 
 关键设计：`decisions` 数组长度等于 `action_requests` 长度。自动审批的位置已填充 `{"type": "approve"}`，需要人工的位置为 `None`。`submit_decision()` 将人工决策填入 `needs_human_indices` 指定的位置，然后整体提交。
+
+`review_configs` 从 `interrupt.value` 中提取，保存到 `PendingApproval` 以支持 UDS 通道将审批数据映射为包含 `allowedDecisions` 和 `reviewConfigJson` 的 UDS 格式。
 
 ## 自动审批规则
 
@@ -403,3 +407,6 @@ logging.getLogger("plush_agent.hitl").setLevel(logging.DEBUG)
 | 流式模式工具调用后无回复 | 自动审批后未 resume streaming — 检查 `_stream_agent()` 或 `_stream_cli()` 的 while 循环是否正确设置 `stream_input = Command(resume={interrupt.id: ...})` |
 | SSE 流无事件返回 | 检查请求头 `X-Stream: true` 或 `Accept: text/event-stream`，检查 `app.state.streaming_approval_handler` 是否设置 |
 | `awrap_model_call` NotImplementedError | `SkillMiddleware` 需同时实现 `wrap_model_call` 和 `awrap_model_call` — 异步上下文（`astream`/`ainvoke`）需要 async 版本 |
+| UDS 审批提交后 SSE 崩溃 `TypeError: ServerSentEvent got unexpected keyword 'kind'` | UDS 的 `_consume_and_push` 必须通过 `_sse_serialize()` 序列化事件后再推入 SSE queue，不能直接推入原始内部事件 |
+| UDS 审批找不到 | 检查 `_collect_all_approvals` 是否同时查了 `approval_handler.pending` 和 `streaming_handler.streaming_pending` |
+| UDS 表单 robotId 不匹配 | `getForms`/`submitForm` 是机器人级操作，请求中 `robotId` 必须与 `config.robot_id` 一致 |

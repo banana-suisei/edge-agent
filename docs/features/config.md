@@ -19,6 +19,8 @@
 | `server` | `ServerConfig` | HTTP 服务参数 |
 | `hitl` | `HitlConfig` | 自动审批规则列表 |
 | `form` | `FormConfig` | 表单工具超时 |
+| `uds` | `UdsConfig` | UDS 审批/表单通道配置 |
+| `robot_id` | `str` | 机器人标识（顶层字段） |
 
 ## ModelConfig
 
@@ -91,6 +93,20 @@ hitl:
 **正则模式必须使用词边界 `\b`**。避免使用 `^.*x.*$` 通配模式，否则会误匹配包含目标子串的词（如 `^.*ls.*$` 会匹配 `npx skills find ...` 中的 "skills"）。
 
 **注意**：`HumanInTheLoopMiddleware` 在 `agent.py` 中配置 `interrupt_on` 对所有已知工具名设置为 `True`（默认拦截所有）。此处的 `auto_approve` 规则控制的是拦截后的自动放行行为——未匹配规则的工具调用会暂停等待人工审批。新增工具必须同时出现在 `interrupt_on`（`agent.py` 中自动从 tools 列表收集）和可选的 `auto_approve` 规则中。
+
+## UdsConfig
+
+```yaml
+robot_id: "robot-0"            # 机器人标识（顶层字段），用于 UDS 表单操作的 robotId 校验
+
+uds:
+  enabled: false               # 是否启用 UDS 通道
+  socket_path: "/tmp/agent-gateway.sock"  # Unix Domain Socket 文件路径
+```
+
+- `enabled`：默认 `false`，设为 `true` 时服务启动会创建 Unix socket 监听
+- `socket_path`：socket 文件路径，启动时自动清理旧文件，关闭时自动删除
+- `robot_id`：顶层字段（非 uds 子配置内），UDS 表单操作（`getForms`/`submitForm`）校验请求中 `robotId` 是否匹配此值；审批操作（`getPendingApprovals`/`submitApprovalDecision`）为节点级不过滤 robotId
 
 ## 加载逻辑
 

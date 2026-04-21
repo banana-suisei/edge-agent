@@ -92,6 +92,12 @@ class FormConfig:
 
 
 @dataclass
+class UdsConfig:
+    enabled: bool = False
+    socket_path: str = "/tmp/agent-gateway.sock"
+
+
+@dataclass
 class Config:
     model: ModelConfig = field(default_factory=ModelConfig)
     agent: AgentConfig = field(default_factory=AgentConfig)
@@ -100,6 +106,8 @@ class Config:
     server: ServerConfig = field(default_factory=ServerConfig)
     hitl: HitlConfig = field(default_factory=HitlConfig)
     form: FormConfig = field(default_factory=FormConfig)
+    uds: UdsConfig = field(default_factory=UdsConfig)
+    robot_id: str = "robot-0"
 
 
 def load_config(path: str | Path) -> Config:
@@ -171,6 +179,15 @@ def load_config(path: str | Path) -> Config:
     if "form" in raw:
         cfg.form = FormConfig(
             default_timeout=raw["form"].get("default_timeout", cfg.form.default_timeout),
+        )
+
+    cfg.robot_id = raw.get("robot_id", cfg.robot_id)
+
+    if "uds" in raw:
+        u = raw["uds"]
+        cfg.uds = UdsConfig(
+            enabled=u.get("enabled", cfg.uds.enabled),
+            socket_path=u.get("socket_path", cfg.uds.socket_path),
         )
 
     return cfg

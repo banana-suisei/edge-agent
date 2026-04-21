@@ -23,6 +23,7 @@ class PendingApproval:
     needs_human_indices: list[int]
     interrupt_id: str = ""
     created_at: float = field(default_factory=time.time)
+    review_configs: list[dict] = field(default_factory=list)
 
 
 class ApprovalHandler:
@@ -118,6 +119,7 @@ class ApprovalHandler:
             decisions=decisions,
             needs_human_indices=[i for i, _ in needs_human],
             interrupt_id=interrupt.id,
+            review_configs=interrupt.value.get("review_configs", []),
         )
 
         return {
@@ -175,6 +177,7 @@ class ApprovalHandler:
             decisions=new_decisions,
             needs_human_indices=[i for i, _ in new_needs_human],
             interrupt_id=new_interrupt.id,
+            review_configs=new_interrupt.value.get("review_configs", []),
         )
 
         return {
