@@ -209,6 +209,8 @@ Agent 调用 form_generate(purpose, requirements, timeout)
 
 ### 4. HITL 审批流
 
+**阻塞模式**（无 SSE 连接时）：
+
 ```
 ApprovalHandler.run_with_hitl(message, thread_id)
   1. agent.ainvoke(version="v2") -> GraphOutput
@@ -228,6 +230,28 @@ ApprovalHandler.run_with_hitl(message, thread_id)
     -> agent.ainvoke(Command(resume={interrupt_id: {"decisions": all_decisions}}))
     -> 可能产生新的 interrupt -> 再次进入 _process_interrupt() 循环
     -> 无新 interrupt -> _extract_done() 返回结果
+```
+
+**SSE 长连接模式**：
+
+```
+StreamingApprovalHandler._handle_interrupt(interrupts, config, tool_call_acc)
+  -> should_auto_approve() 过滤
+  -> 全部自动通过 -> 内部递归 _stream_agent(Command(resume=...))
+  -> 需要人工 -> 存入 self.streaming_pending[thread_id]
+  -> yield {"kind": "event", "type": "approval_request", ...}
+
+用户 POST /api/approvals/{id}/decide
+  -> 检测 thread_id 有 SSE 连接 -> 后台 submit_decision_streaming()
+  -> LangGraph resume -> 通过原 SSE 推送后续输出
+```
+
+**双 handler 待审批查询**：
+
+`main.py` 中 `ApprovalHandler` 和 `StreamingApprovalHandler` 是两个独立实例，分别维护各自的 pending dict。
+`GET /api/approvals` 和 `GET /api/approvals/{id}` 同时查询两个 handler：
+- `approval_handler.pending`（阻塞模式）
+- `streaming_approval_handler.streaming_pending`（SSE 模式）
 ```
 
 ## 模块依赖关系
@@ -260,8 +284,11 @@ hitl/approval_handler.py -> config.py
 server/routes_chat.py -> server/session.py (SessionManager)
                       -> hitl/streaming_handler.py
                       -> tools/memory.py (save_session_summary, load_session_summary)
-server/routes_approval.py -> server/routes_chat.py (_sse_serialize, _consume_and_push)
-                          -> hitl/streaming_handler.py
+server/routes_approval.py -> server/routes_chat.py (_sse_serialize, _consume_and_push, _get_session_manager)
+                          -> hitl/approval_handler.py (阻塞模式 pending)
+                          -> hitl/streaming_handler.py (SSE 模式 streaming_pending)
+    GET /api/approvals, GET /api/approvals/{id} 同时查两个 handler 的 pending dict
+    POST /api/approvals/{id}/decide 按是否有 SSE 连接分流
 server/routes_*.py -> tools/form.py
 ```
 

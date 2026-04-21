@@ -149,6 +149,14 @@ if prev_summary:
 {"status": "accepted"}
 ```
 
+### GET /api/approvals（双模式查询）
+
+同时查询阻塞模式（`approval_handler.pending`）和 SSE 模式（`streaming_approval_handler.streaming_pending`）的待审批数据。无论审批请求来自哪种模式，都能被查到。
+
+### GET /api/approvals/{id}（双模式查询）
+
+同上，按 approval_id 查找时依次搜索阻塞模式 pending 和 SSE 模式 streaming_pending。
+
 ### POST /api/chat/end
 
 结束会话，生成对话摘要并保存到长期记忆。**仅在无 SSE 连接时可用**。
@@ -190,5 +198,6 @@ plush-agent --config prod.yaml serve     # 指定配置文件
 | /chat/end 返回 no_conversation | thread_id 是否正确，对话是否已发生 |
 | SSE 无事件返回 | 检查 `session_manager` 是否注册，检查 queue 是否创建 |
 | SSE 审批后无输出 | 检查 `streaming_pending` 中是否有对应 approval_id |
+| GET /api/approvals 返回空 | 确认路由同时查了 `approval_handler.pending` 和 `streaming_approval_handler.streaming_pending` |
 | SSE 断开后摘要未保存 | 检查 `_on_stream_disconnect` 日志 |
 | 新连接未踢掉旧连接 | `SessionManager.close()` 是否正确清理 |

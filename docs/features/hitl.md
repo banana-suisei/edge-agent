@@ -222,7 +222,9 @@ LLM 的 `tool_call_chunks` 以 JSON 片段形式分多次到达。handler 在 `t
 
 ### 独立的 pending 存储
 
-`StreamingApprovalHandler` 使用自己的 `self.streaming_pending` dict，与基类的 `self.pending` 分离。这是因为阻塞模式和流式模式的 pending 审批由不同的 handler 管理。
+`StreamingApprovalHandler` 使用自己的 `self.streaming_pending` dict，与基类的 `self.pending` 分离。这是因为 `main.py` 中两者是独立实例。
+
+**双 handler 查询**：`GET /api/approvals` 和 `GET /api/approvals/{id}` 同时查询 `approval_handler.pending`（阻塞模式）和 `streaming_approval_handler.streaming_pending`（SSE 模式），确保两种模式下的待审批都能被查到。详见 `routes_approval.py`。
 
 ### CLI 流式 HITL
 
