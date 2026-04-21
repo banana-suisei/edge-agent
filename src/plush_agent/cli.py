@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import re
 
 import click
@@ -9,6 +10,8 @@ from langchain_core.messages import AIMessageChunk, ToolMessage
 from langgraph.types import Command
 
 from plush_agent.config import Config, load_config
+
+logger = logging.getLogger("plush_agent.hitl")
 
 
 def _sanitize_surrogates(text: str) -> str:
@@ -23,6 +26,7 @@ def _should_auto_approve(config: Config, tool_name: str, tool_args: dict) -> boo
         args_str = str(tool_args)
         for pattern in rule.args_patterns:
             if re.search(pattern, args_str):
+                logger.debug("auto-approve matched: tool=%s, pattern=%s, args_str=%s", tool_name, pattern, args_str)
                 return True
     return False
 
@@ -148,7 +152,9 @@ async def _stream_cli(agent, input_data, cfg, config: Config):
         decisions = []
         needs_human = False
         for action in action_requests:
-            if _should_auto_approve(config, action["name"], action["args"]):
+            auto = _should_auto_approve(config, action["name"], action["args"])
+            logger.debug("HITL check: tool=%s, args=%s, auto_approve=%s", action["name"], action["args"], auto)
+            if auto:
                 decisions.append({"type": "approve"})
             else:
                 needs_human = True

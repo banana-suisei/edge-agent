@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import re
 import time
 from dataclasses import dataclass, field
@@ -8,6 +9,8 @@ from uuid import uuid4
 from langgraph.types import Command
 
 from plush_agent.config import Config
+
+logger = logging.getLogger("plush_agent.hitl")
 
 
 @dataclass
@@ -35,6 +38,7 @@ class ApprovalHandler:
             args_str = str(tool_args)
             for pattern in rule.args_patterns:
                 if re.search(pattern, args_str):
+                    logger.debug("auto-approve matched: tool=%s, pattern=%s, args_str=%s", tool_name, pattern, args_str)
                     return True
         return False
 

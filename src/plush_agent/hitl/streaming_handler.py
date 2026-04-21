@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from enum import Enum
 from uuid import uuid4
 
@@ -9,6 +10,8 @@ from langgraph.types import Command
 
 from plush_agent.hitl.approval_handler import ApprovalHandler, PendingApproval
 from plush_agent.config import Config
+
+logger = logging.getLogger("plush_agent.hitl")
 
 
 class SSEEventType(str, Enum):
@@ -111,7 +114,9 @@ class StreamingApprovalHandler(ApprovalHandler):
         needs_human: list[tuple[int, dict]] = []
 
         for i, action in enumerate(action_requests):
-            if self.should_auto_approve(action["name"], action["args"]):
+            auto = self.should_auto_approve(action["name"], action["args"])
+            logger.debug("HITL check: tool=%s, args=%s, auto_approve=%s", action["name"], action["args"], auto)
+            if auto:
                 decisions.append({"type": "approve"})
             else:
                 decisions.append(None)
