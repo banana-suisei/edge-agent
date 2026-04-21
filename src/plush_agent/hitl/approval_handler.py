@@ -18,6 +18,7 @@ class PendingApproval:
     action_requests: list[dict]
     decisions: list[dict | None]
     needs_human_indices: list[int]
+    interrupt_id: str = ""
     created_at: float = field(default_factory=time.time)
 
 
@@ -91,13 +92,14 @@ class ApprovalHandler:
         if not result.interrupts:
             return self._extract_done(result)
 
+        interrupt = result.interrupts[0]
         action_requests, decisions, needs_human, pending_actions = (
-            self._process_interrupt(result.interrupts[0].value)
+            self._process_interrupt(interrupt.value)
         )
 
         if not needs_human:
             result = await self.agent.ainvoke(
-                Command(resume={"decisions": decisions}),
+                Command(resume={interrupt.id: {"decisions": decisions}}),
                 config=config,
                 version="v2",
             )
@@ -111,6 +113,7 @@ class ApprovalHandler:
             action_requests=action_requests,
             decisions=decisions,
             needs_human_indices=[i for i, _ in needs_human],
+            interrupt_id=interrupt.id,
         )
 
         return {
@@ -136,7 +139,7 @@ class ApprovalHandler:
             pending.decisions[idx] = human_decisions[j]
 
         result = await self.agent.ainvoke(
-            Command(resume={"decisions": pending.decisions}),
+            Command(resume={pending.interrupt_id: {"decisions": pending.decisions}}),
             config=pending.config,
             version="v2",
         )
@@ -146,13 +149,14 @@ class ApprovalHandler:
         if not result.interrupts:
             return self._extract_done(result)
 
+        new_interrupt = result.interrupts[0]
         new_action_requests, new_decisions, new_needs_human, new_pending_actions = (
-            self._process_interrupt(result.interrupts[0].value)
+            self._process_interrupt(new_interrupt.value)
         )
 
         if not new_needs_human:
             result = await self.agent.ainvoke(
-                Command(resume={"decisions": new_decisions}),
+                Command(resume={new_interrupt.id: {"decisions": new_decisions}}),
                 config=pending.config,
                 version="v2",
             )
@@ -166,6 +170,7 @@ class ApprovalHandler:
             action_requests=new_action_requests,
             decisions=new_decisions,
             needs_human_indices=[i for i, _ in new_needs_human],
+            interrupt_id=new_interrupt.id,
         )
 
         return {

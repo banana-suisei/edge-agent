@@ -64,7 +64,7 @@ def _handle_cli_hitl(agent, result, cfg, config: Config):
                     break
 
         result = agent.invoke(
-            Command(resume={"decisions": decisions}),
+            Command(resume={interrupt.id: {"decisions": decisions}}),
             cfg,
             version="v2",
         )
@@ -102,12 +102,11 @@ async def _stream_cli(agent, input_data, cfg, config: Config):
             version="v2",
         ):
             chunk_type = chunk.get("type")
-
             if chunk_type == "messages":
                 token, metadata = chunk["data"]
                 if isinstance(token, AIMessageChunk):
-                    if token.content:
-                        click.echo(token.content, nl=False)
+                    if token.text:
+                        click.echo(token.text, nl=False)
                     for tc in token.tool_call_chunks:
                         tc_id = tc.get("id")
                         if not tc_id:
@@ -170,7 +169,7 @@ async def _stream_cli(agent, input_data, cfg, config: Config):
             # Human was involved — fall back to sync for the remainder
             click.echo()
             result = await agent.ainvoke(
-                Command(resume={"decisions": decisions}),
+                Command(resume={interrupt.id: {"decisions": decisions}}),
                 cfg,
                 version="v2",
             )
@@ -179,7 +178,7 @@ async def _stream_cli(agent, input_data, cfg, config: Config):
             return result
 
         # All auto-approved — resume streaming loop
-        stream_input = Command(resume={"decisions": decisions})
+        stream_input = Command(resume={interrupt.id: {"decisions": decisions}})
 
 
 @cli.command()
@@ -199,7 +198,6 @@ def chat(ctx, stream: bool) -> None:
 
     click.echo("Plush Agent CLI（输入 /quit 退出）")
 
-    all_messages: list = []
     try:
         while True:
             user_input = click.prompt("", default="", show_default=False)
@@ -207,7 +205,7 @@ def chat(ctx, stream: bool) -> None:
                 break
             user_input = _sanitize_surrogates(user_input)
 
-            if prev_summary and not all_messages:
+            if prev_summary and checkpointer.get_tuple(cfg) is None:
                 enriched = (
                     f"[上一次对话摘要]\n{prev_summary}\n"
                     f"[当前消息]\n{user_input}"
@@ -216,7 +214,7 @@ def chat(ctx, stream: bool) -> None:
                 enriched = user_input
 
             if stream:
-                result = asyncio.get_event_loop().run_until_complete(
+                asyncio.get_event_loop().run_until_complete(
                     _stream_cli(
                         agent,
                         {"messages": [{"role": "user", "content": enriched}]},
@@ -232,21 +230,19 @@ def chat(ctx, stream: bool) -> None:
                 )
                 result = _handle_cli_hitl(agent, result, cfg, config)
                 _print_reply(result)
-
-            if result is not None:
-                state = result.value if hasattr(result, "value") else result
-                if isinstance(state, dict):
-                    all_messages = state.get("messages", all_messages)
     except (KeyboardInterrupt, EOFError):
         click.echo()
     finally:
-        if all_messages:
-            click.echo("正在保存对话记忆...")
-            try:
-                save_session_summary(store, all_messages, config)
-                click.echo("对话记忆已保存。")
-            except Exception:
-                click.echo("保存对话记忆失败。")
+        snapshot = checkpointer.get_tuple(cfg)
+        if snapshot:
+            msgs = snapshot.checkpoint.get("channel_values", {}).get("messages", [])
+            if msgs:
+                click.echo("正在保存对话记忆...")
+                try:
+                    save_session_summary(store, msgs, config)
+                    click.echo("对话记忆已保存。")
+                except Exception:
+                    click.echo("保存对话记忆失败。")
 
 
 @cli.command()

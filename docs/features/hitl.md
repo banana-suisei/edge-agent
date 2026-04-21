@@ -22,7 +22,7 @@ HITL 分两层：
               │  HumanInTheLoopMiddleware         │
               │  - after_model hook 拦截 tool_calls│
               │  - interrupt() 暂停执行           │
-              │  - Command(resume=decisions) 恢复 │
+              │  - Command(resume={interrupt.id: {"decisions": ...}}) 恢复 │
               │  - interrupt_on={tool: True}      │
               │    所有工具默认拦截，安全优先       │
               └──────────────┬───────────────────┘
@@ -86,17 +86,17 @@ Step 3: ApprovalHandler._process_interrupt() 解析 interrupt.value
         → 从 review_configs 提取每个 action 的 allowed_decisions
 
 Step 4a: 全部自动审批
-        → agent.ainvoke(Command(resume={decisions}), config, version="v2")
+        → agent.ainvoke(Command(resume={interrupt.id: {"decisions": decisions}}), config, version="v2")
         → _extract_done() → {"status": "done", "content": reply}
 
 Step 4b: 部分需要人工
-        → 存入 self.pending[thread_id] = PendingApproval(...)
+        → 存入 self.pending[thread_id] = PendingApproval(interrupt_id=interrupt.id, ...)
         → 返回 {"status": "pending_approval", "pending_actions": [...]}
 
 Step 5: 用户 POST /api/approvals/{id}/decide {decisions: [...]}
         → ApprovalHandler.submit_decision()
         → 将 human_decisions 填入 decisions 数组对应位置
-        → agent.ainvoke(Command(resume={all_decisions}), config, version="v2")
+        → agent.ainvoke(Command(resume={interrupt_id: {"decisions": all_decisions}}), config, version="v2")
         → 可能产生新的 interrupt → _process_interrupt() 再次处理
         → 无新 interrupt → _extract_done() 返回结果
 ```
@@ -174,7 +174,7 @@ def _handle_cli_hitl(agent, result, cfg, config: Config):
 
 | 事件 | 触发时机 | 数据结构 |
 |------|----------|----------|
-| `token` | LLM 生成文本片段 | `{"content": "..."}` |
+| `token` | LLM 生成文本片段（通过 `token.text` 获取） | `{"content": "..."}` |
 | `tool_call` | 工具调用完成（参数累积后） | `{"name": "...", "args": {...}, "id": "..."}` |
 | `tool_result` | 工具执行完成 | `{"name": "...", "content": "..."}` |
 | `interrupt` | HITL 需人工审批 | `{"approval_id": "...", "pending_actions": [...], "auto_approved_count": N}` |
@@ -197,7 +197,7 @@ if "__interrupt__" in update_data:
 
 ### 自动审批的内部恢复
 
-当所有 action 都匹配自动审批规则时，handler 内部递归调用 `_stream_agent(Command(resume=decisions), ...)` 继续流式输出，不向客户端发送 interrupt 事件。客户端看到无缝的 token 流。
+当所有 action 都匹配自动审批规则时，handler 内部递归调用 `_stream_agent(Command(resume={interrupt.id: {"decisions": ...}}), ...)` 继续流式输出，不向客户端发送 interrupt 事件。客户端看到无缝的 token 流。
 
 ### 工具调用累积
 
@@ -214,7 +214,7 @@ CLI 的 `_stream_cli()` 使用 `while True` 循环结构：
 1. `agent.astream(stream_mode=["messages","updates"])` 流式输出 token
 2. 检测到 `__interrupt__` → break 退出内层 async for
 3. 自动审批的 action 直接 approve
-4. 全部自动审批 → `stream_input = Command(resume=decisions)`，回到 while 循环继续流式输出
+4. 全部自动审批 → `stream_input = Command(resume={interrupt.id: {"decisions": ...}})`，回到 while 循环继续流式输出
 5. 需人工审批 → 回退到 `_handle_cli_hitl()` 同步处理剩余流程
 
 ## PendingApproval 数据模型
@@ -228,6 +228,7 @@ class PendingApproval:
     action_requests: list[dict]   # 官方 middleware 返回的原始 action_requests
     decisions: list[dict | None]  # 已填充 approve + 待填充 None
     needs_human_indices: list[int] # 需要人工决策的索引位置
+    interrupt_id: str             # LangGraph Interrupt.id，用于 resume 命令
     created_at: float             # 创建时间戳
 ```
 
@@ -290,6 +291,7 @@ Body: {
 ## 关键约束
 
 1. **`version="v2"`** 是必须的——只有 v2 格式才返回 `GraphOutput.interrupts`
+0. **resume 必须包含 `interrupt.id`**——官方格式为 `Command(resume={interrupt.id: {"decisions": [...]}})`
 2. **`thread_id` 必须一致**——interrupt 和 resume 使用同一个 thread_id
 3. **`checkpointer` 必须配置**——HITL 依赖 LangGraph checkpointer 保存中断状态
 4. **所有 decision 必须一次性提交**——官方 middleware 不支持部分恢复
@@ -358,6 +360,6 @@ return result  # 始终是结构化 dict，直接返回
 | 工具直接执行无审批 | 检查 `HumanInTheLoopMiddleware` 是否在 middleware 列表中 |
 | 新工具绕过审批 | 检查 `interrupt_on` 是否包含该工具名 |
 | 流式模式工具无审批/interrupt | `_stream_cli()` 或 `_stream_agent()` 中 `__interrupt__` 检测 — 必须在遍历 `update_data.items()` 前检查顶层键 |
-| 流式模式工具调用后无回复 | 自动审批后未 resume streaming — 检查 `_stream_agent()` 或 `_stream_cli()` 的 while 循环是否正确设置 `stream_input = Command(resume=...)` |
+| 流式模式工具调用后无回复 | 自动审批后未 resume streaming — 检查 `_stream_agent()` 或 `_stream_cli()` 的 while 循环是否正确设置 `stream_input = Command(resume={interrupt.id: ...})` |
 | SSE 流无事件返回 | 检查请求头 `X-Stream: true` 或 `Accept: text/event-stream`，检查 `app.state.streaming_approval_handler` 是否设置 |
 | `awrap_model_call` NotImplementedError | `SkillMiddleware` 需同时实现 `wrap_model_call` 和 `awrap_model_call` — 异步上下文（`astream`/`ainvoke`）需要 async 版本 |

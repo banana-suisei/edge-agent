@@ -40,7 +40,6 @@ def load_skill(skill_name: str) -> str:
 
 
 class SkillMiddleware(AgentMiddleware):
-    tools = [load_skill]
 
     def __init__(self, loader: SkillLoader) -> None:
         _set_loader(loader)

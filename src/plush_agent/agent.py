@@ -28,7 +28,6 @@ def build_agent(config: Config):
     tools = _collect_tools(config)
 
     all_tool_names = {t.name for t in tools}
-    all_tool_names.add("load_skill")
     interrupt_on = {name: True for name in all_tool_names}
 
     hitl_middleware = HumanInTheLoopMiddleware(

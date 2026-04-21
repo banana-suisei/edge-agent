@@ -16,7 +16,7 @@ Plush-Agent 是一个基于 LangChain 的 ReAct Agent，使用 OpenAI 接口标�
 │  └────┬─────┘              └────────────┬─────────────┘ │
 └───────┼─────────────────────────────────┼───────────────┘
         │                                 │
-        ▼                                 ▼
+        v                                 v
 ┌─────────────────────────────────────────────────────────┐
 │                   Agent 编排层                            │
 │                                                         │
@@ -27,14 +27,14 @@ Plush-Agent 是一个基于 LangChain 的 ReAct Agent，使用 OpenAI 接口标�
 │         │                 │                              │
 │  ┌──────┴─────────────────┴─────────────────────────┐   │
 │  │              Middleware Pipeline                  │   │
-│  │  SkillMiddleware → HumanInTheLoopMiddleware      │   │
+│  │  SkillMiddleware -> HumanInTheLoopMiddleware      │   │
 │  │  (所有工具默认拦截，interrupt_on={tool:True})      │   │
 │  └──────────────────────────────────────────────────┘   │
 │                                                         │
 └──────────────────────────┬──────────────────────────────┘
                            │
         ┌──────────────────┼──────────────────────┐
-        ▼                  ▼                      ▼
+        v                  v                      |
 ┌──────────────┐  ┌────────────────────────┐  ┌──────────────────────┐
 │   Tools 层    │  │  记忆层                │  │  Skills 层           │
 │              │  │                       │  │                      │
@@ -42,7 +42,7 @@ Plush-Agent 是一个基于 LangChain 的 ReAct Agent，使用 OpenAI 接口标�
 │ │ terminal │ │  │ + pgvector (向量搜索)  │  │ └── <name>/           │
 │ │ (Bash)   │ │  │ + OpenAIEmbeddings     │  │     ├── SKILL.md     │
 │ ├──────────┤ │  │ namespace/             │  │     ├── scripts/     │
-│ │form_     │ │  │ key → JSON (含向量)    │  │     └── references/  │
+│ │form_     │ │  │ key -> JSON (含向量)    │  │     └── references/  │
 │ │generate  │ │  │                       │  │                      │
 │ ├──────────┤ │  └────────────────────────┘  │  SkillLoader (扫描)  │
 │ │load_skill│ │                               │  SkillMiddleware     │
@@ -75,7 +75,7 @@ plush-agent/
 │       ├── references/               # 可选：参考文档
 │       └── assets/                   # 可选：模板、资源
 ├── src/plush_agent/
-│   ├── config.py                     # 配置加载 (YAML → dataclass)
+│   ├── config.py                     # 配置加载 (YAML -> dataclass)
 │   ├── agent.py                      # Agent 创建入口 (build_agent)
 │   ├── cli.py                        # CLI 入口 (click: chat, serve)
 │   ├── skills/
@@ -106,121 +106,105 @@ plush-agent/
 ### 1a. 聊天请求流（阻塞模式）
 
 ```
-用户消息 → FastAPI /api/chat
-         → ApprovalHandler.run_with_hitl()
-           → agent.ainvoke(messages, config, version="v2")
-             → SkillMiddleware 注入 skill 描述到 system prompt
-             → LLM 生成回复 (可能包含 tool_calls)
-             → HumanInTheLoopMiddleware 拦截所有 tool_calls
+用户消息 -> FastAPI /api/chat
+         -> ApprovalHandler.run_with_hitl()
+           -> agent.ainvoke(messages, config, version="v2")
+             -> SkillMiddleware 注入 skill 描述到 system prompt
+             -> LLM 生成回复 (可能包含 tool_calls)
+             -> HumanInTheLoopMiddleware 拦截所有 tool_calls
                (interrupt_on={tool_name: True}，所有工具默认拦截)
            ← GraphOutput (含 .interrupts)
-         → _process_interrupt() 解析 action_requests + review_configs
-         → should_auto_approve() 正则匹配 tool name + args
-         → 全部自动通过 → resume → _extract_done() 返回结果
-         → 需要人工 → 返回 pending_approval 等待 HTTP 决策
+         -> _process_interrupt() 解析 action_requests + review_configs
+         -> should_auto_approve() 正则匹配 tool name + args
+         -> 全部自动通过 -> resume -> _extract_done() 返回结果
+         -> 需要人工 -> 返回 pending_approval 等待 HTTP 决策
 ```
 
 ### 1b. 聊天请求流（SSE 流式模式）
 
 ```
-用户消息 → FastAPI /api/chat (X-Stream: true)
-         → EventSourceResponse(streaming_handler.run_streaming())
-           → agent.astream(messages, stream_mode=["messages","updates"], version="v2")
-             → messages chunk → yield SSE token / tool_call 事件
-             → updates chunk (tools) → yield SSE tool_result 事件
-             → updates chunk (__interrupt__) → _handle_interrupt():
-               → 全部自动通过 → 内部 resume streaming → 继续输出
-               → 需要人工 → yield SSE interrupt 事件 → 流结束
+用户消息 -> FastAPI /api/chat (X-Stream: true)
+         -> EventSourceResponse(streaming_handler.run_streaming())
+           -> agent.astream(messages, stream_mode=["messages","updates"], version="v2")
+             -> messages chunk -> token.text -> yield SSE token 事件
+             -> messages chunk -> token.tool_call_chunks -> 累积工具调用参数
+             -> updates chunk (tools) -> yield SSE tool_result 事件
+             -> updates chunk (__interrupt__) -> _handle_interrupt():
+               -> 全部自动通过 -> Command(resume={interrupt.id: {"decisions": ...}}) 内部 resume streaming
+               -> 需要人工 -> yield SSE interrupt 事件 -> 流结束
 
 审批恢复 (X-Stream: true):
 POST /api/approvals/{id}/decide
-         → EventSourceResponse(streaming_handler.submit_decision_streaming())
-           → agent.astream(Command(resume=decisions), ...)
-           → 继续流式输出后续 token / tool_call / tool_result 事件
-```
-
-```
-用户消息 → FastAPI /api/chat
-         → ApprovalHandler.run_with_hitl()
-           → agent.ainvoke(messages, config, version="v2")
-             → SkillMiddleware 注入 skill 描述到 system prompt
-             → LLM 生成回复 (可能包含 tool_calls)
-             → HumanInTheLoopMiddleware 拦截所有 tool_calls
-               (interrupt_on={tool_name: True}，所有工具默认拦截)
-           ← GraphOutput (含 .interrupts)
-         → _process_interrupt() 解析 action_requests + review_configs
-         → should_auto_approve() 正则匹配 tool name + args
-         → 全部自动通过 → resume → _extract_done() 返回结果
-         → 需要人工 → 返回 pending_approval 等待 HTTP 决策
-```
-
+         -> EventSourceResponse(streaming_handler.submit_decision_streaming())
+           -> agent.astream(Command(resume={interrupt_id: {"decisions": ...}}), ...)
+           -> 继续流式输出后续 token / tool_call / tool_result 事件
 ### 2. 长期记忆流
 
 ```
 Agent 对话中
-  → LLM 判断需要记忆信息
-  → 调用 save_memory(key, value)
+  -> LLM 判断需要记忆信息
+  -> 调用 save_memory(key, value)
     key 为自然语言标识（如 "user preference for python data analysis"）
     namespace 固定为 ("users", "default")
-    → runtime.store.put(("users","default"), key, {"content": value})
-    → PostgresStore 自动对 content 字段生成向量嵌入 (OpenAIEmbeddings)
-    → 写入 PostgreSQL (pgvector)
+    -> runtime.store.put(("users","default"), key, {"content": value})
+    -> PostgresStore 自动对 content 字段生成向量嵌入 (OpenAIEmbeddings)
+    -> 写入 PostgreSQL (pgvector)
 
 Agent 对话中
-  → LLM 判断需要回忆信息
-  → 调用 search_memory(query)
+  -> LLM 判断需要回忆信息
+  -> 调用 search_memory(query)
     query 为自然语言查询（如 "user likes programming"）
     namespace 固定为 ("users", "default")
-    → runtime.store.search(("users","default"), query=query)
-    → PostgresStore 使用 pgvector 进行余弦相似度向量搜索
-    → 返回语义最相关的记忆 → 返回给 Agent
+    -> runtime.store.search(("users","default"), query=query)
+    -> PostgresStore 使用 pgvector 进行余弦相似度向量搜索
+    -> 返回语义最相关的记忆 -> 返回给 Agent
 
 会话结束时（CLI /quit 或 POST /api/chat/end）
-  → save_session_summary(store, messages, config)
-    → LLM 生成对话摘要（含重试逻辑，最多 3 次尝试避免空响应）
-    → store.put(("sessions",), "latest", {"content": summary, ...})
-    → 写入 PostgresStore
+  -> save_session_summary(store, messages, config)
+    -> LLM 生成对话摘要（含重试逻辑，最多 3 次尝试避免空响应）
+    -> store.put(("sessions",), "latest", {"content": summary, ...})
+    -> 写入 PostgresStore
 
 下次启动（新 thread 首条消息）
-  → load_session_summary(store)
-    → store.get(("sessions",), "latest")
-    → 注入到首条用户消息: "[上一次对话摘要]\n...\n[当前消息]\n..."
+  -> load_session_summary(store)
+    -> store.get(("sessions",), "latest")
+    -> 注入到首条用户消息: "[上一次对话摘要]\n...\n[当前消息]\n..."
 ```
 
 ### 3. 表单工具流
 
 ```
 Agent 调用 form_generate(purpose, requirements, timeout)
-  → LLM 生成表单 JSON schema
-  → 存入 _pending_forms[form_id]
-  → asyncio.Event 等待
-用户 GET /api/forms/{form_id} → 获取表单
-用户 POST /api/forms/{form_id}/submit → submit_form() 触发 event.set()
-  → tool 返回用户填写数据
-超时 → tool 返回 timeout 状态
+  -> LLM 生成表单 JSON schema
+  -> 存入 _pending_forms[form_id]
+  -> asyncio.Event 等待
+用户 GET /api/forms/{form_id} -> 获取表单
+用户 POST /api/forms/{form_id}/submit -> submit_form() 触发 event.set()
+  -> tool 返回用户填写数据
+超时 -> tool 返回 timeout 状态
 ```
 
 ### 4. HITL 审批流
 
 ```
 ApprovalHandler.run_with_hitl(message, thread_id)
-  1. agent.ainvoke(version="v2") → GraphOutput
-  2. result.interrupts 为空 → _extract_done() 返回 {"status": "done", ...}
+  1. agent.ainvoke(version="v2") -> GraphOutput
+  2. result.interrupts 为空 -> _extract_done() 返回 {"status": "done", ...}
   3. _process_interrupt() 解析 interrupt.value:
      - action_requests: [{name, args, description}, ...]
      - review_configs: [{action_name, allowed_decisions}, ...]
   4. 遍历 action_requests:
-     - should_auto_approve(name, args) → decisions[i] = {"type": "approve"}
-     - 不匹配 → decisions[i] = None, 加入 needs_human
-  5. needs_human 为空 → resume → _extract_done()
-  6. needs_human 非空 → 存入 self.pending, 返回 {"status": "pending_approval", ...}
+     - should_auto_approve(name, args) -> decisions[i] = {"type": "approve"}
+     - 不匹配 -> decisions[i] = None, 加入 needs_human
+  5. needs_human 为空 -> Command(resume={interrupt.id: {"decisions": ...}}) -> _extract_done()
+  6. needs_human 非空 -> 存入 self.pending(interrupt_id=interrupt.id), 返回 {"status": "pending_approval", ...}
 
 用户 POST /api/approvals/{id}/decide
-  → ApprovalHandler.submit_decision()
-    → 填充 human_decisions 到 decisions 数组
-    → agent.ainvoke(Command(resume=all_decisions))
-    → 可能产生新的 interrupt → 再次进入 _process_interrupt() 循环
-    → 无新 interrupt → _extract_done() 返回结果
+  -> ApprovalHandler.submit_decision()
+    -> 填充 human_decisions 到 decisions 数组
+    -> agent.ainvoke(Command(resume={interrupt_id: {"decisions": all_decisions}}))
+    -> 可能产生新的 interrupt -> 再次进入 _process_interrupt() 循环
+    -> 无新 interrupt -> _extract_done() 返回结果
 ```
 
 ## 模块依赖关系
@@ -228,30 +212,30 @@ ApprovalHandler.run_with_hitl(message, thread_id)
 ```
 config.py ← (被所有模块引用)
 
-cli.py → config.py
-       → agent.py (chat 模式)
-       → tools/memory.py (save_session_summary, load_session_summary)
-       → server/main.py (serve 模式)
+cli.py -> config.py
+       -> agent.py (chat 模式)
+       -> tools/memory.py (save_session_summary, load_session_summary)
+       -> server/main.py (serve 模式)
 
-server/main.py → agent.py
-               → hitl/approval_handler.py
-               → hitl/streaming_handler.py
-               → server/app.py
+server/main.py -> agent.py
+               -> hitl/approval_handler.py
+               -> hitl/streaming_handler.py
+               -> server/app.py
 
-agent.py → config.py
-         → skills/loader.py + skills/middleware.py
-         → tools/bash.py + tools/form.py + tools/memory.py
-         → mcp/loader.py
-         → memory/store.py
+agent.py -> config.py
+         -> skills/loader.py + skills/middleware.py
+         -> tools/bash.py + tools/form.py + tools/memory.py
+         -> mcp/loader.py
+         -> memory/store.py
 
-hitl/approval_handler.py → config.py
+hitl/approval_handler.py -> config.py
                           (依赖 agent 实例，不依赖具体 agent 构建逻辑)
 
-server/routes_chat.py → hitl/approval_handler.py
-                      → hitl/streaming_handler.py
-                      → tools/memory.py (save_session_summary, load_session_summary)
-server/routes_approval.py → hitl/streaming_handler.py
-server/routes_*.py → tools/form.py
+server/routes_chat.py -> hitl/approval_handler.py
+                      -> hitl/streaming_handler.py
+                      -> tools/memory.py (save_session_summary, load_session_summary)
+server/routes_approval.py -> hitl/streaming_handler.py
+server/routes_*.py -> tools/form.py
 ```
 
 ## 关键设计决策

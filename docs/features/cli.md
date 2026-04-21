@@ -25,9 +25,9 @@ plush-agent --config my-config.yaml chat
 4. 使用固定 `thread_id = "cli-session"` 维持对话上下文
 5. 循环读取用户输入，`_sanitize_surrogates()` 清理编码后发送给 agent
 6. **阻塞模式**：`agent.invoke(version="v2")` 获取回复，`_handle_cli_hitl()` 处理中断，`_print_reply()` 显示
-7. **流式模式** (`--stream`)：`_stream_cli()` 使用 `agent.astream(stream_mode=["messages","updates"])` 实时输出 token
-   - HITL 中断检测：`__interrupt__` 位于 `updates` chunk 的 `data` 顶层键
-   - 自动审批：匹配规则的工具自动通过，循环调用 `astream(Command(resume=...))` 继续流式输出
+7. **流式模式** (`--stream`)：`_stream_cli()` 使用 `agent.astream(stream_mode=["messages","updates"])` 通过 `token.text` 实时输出文本
+   - HITL 中断检测：`__interrupt__` 位于 `updates` chunk 的 `data` 顶层键，使用 `interrupt.id` 构建 resume 命令
+   - 自动审批：匹配规则的工具自动通过，使用 `Command(resume={interrupt.id: {"decisions": ...}})` 继续流式输出
    - 人工审批：中断流式输出，回退到 `_handle_cli_hitl()` 同步处理后续
 8. 输入 `/quit` 或 Ctrl+C/EOF 退出
 9. 退出前 `save_session_summary()` 保存对话摘要到 store

@@ -67,8 +67,8 @@ class StreamingApprovalHandler(ApprovalHandler):
                 token, metadata = chunk["data"]
                 if not isinstance(token, AIMessageChunk):
                     continue
-                if token.content:
-                    yield {"event": SSEEventType.TOKEN, "data": {"content": token.content}}
+                if token.text:
+                    yield {"event": SSEEventType.TOKEN, "data": {"content": token.text}}
                 self._process_tool_call_chunks(token, tool_call_acc)
 
             elif chunk_type == "updates":
@@ -103,7 +103,6 @@ class StreamingApprovalHandler(ApprovalHandler):
 
     async def _handle_interrupt(self, interrupts, config, tool_call_acc):
         """Process an interrupt: auto-approve or yield interrupt event."""
-        # interrupts can be a tuple/list of Interrupt objects or a single dict
         interrupt = interrupts[0] if isinstance(interrupts, (tuple, list)) else interrupts
         action_requests = interrupt.value.get("action_requests", [])
         review_configs = interrupt.value.get("review_configs", [])
@@ -120,7 +119,7 @@ class StreamingApprovalHandler(ApprovalHandler):
 
         if not needs_human:
             async for evt in self._stream_agent(
-                Command(resume={"decisions": decisions}), config, tool_call_acc
+                Command(resume={interrupt.id: {"decisions": decisions}}), config, tool_call_acc
             ):
                 yield evt
             return
@@ -148,6 +147,7 @@ class StreamingApprovalHandler(ApprovalHandler):
             action_requests=action_requests,
             decisions=decisions,
             needs_human_indices=[i for i, _ in needs_human],
+            interrupt_id=interrupt.id,
         )
 
         yield {
@@ -200,7 +200,7 @@ class StreamingApprovalHandler(ApprovalHandler):
 
         try:
             async for evt in self._stream_agent(
-                Command(resume={"decisions": pending.decisions}),
+                Command(resume={pending.interrupt_id: {"decisions": pending.decisions}}),
                 pending.config,
                 tool_call_acc,
             ):

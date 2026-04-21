@@ -70,7 +70,7 @@ FastAPI 自动生成 `/docs`（Swagger UI）和 `/redoc`（ReDoc）文档。
 
 | 事件类型 | 说明 | 数据示例 |
 |----------|------|----------|
-| `token` | LLM 生成的文本片段 | `{"content": "你好"}` |
+| `token` | LLM 生成的文本片段（通过 `token.text` 获取） | `{"content": "你好"}` |
 | `tool_call` | LLM 决定调用工具（完整参数） | `{"name": "terminal", "args": {"commands": "ls"}, "id": "c1"}` |
 | `tool_result` | 工具执行结果 | `{"name": "terminal", "content": "file1\nfile2"}` |
 | `interrupt` | HITL 审批中断 | `{"approval_id": "uuid", "pending_actions": [...], "auto_approved_count": 0}` |

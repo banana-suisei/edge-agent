@@ -24,8 +24,9 @@ def _make_action(name, args, description=""):
 
 
 class MockInterrupt:
-    def __init__(self, value):
+    def __init__(self, value, id="mock-interrupt-id"):
         self.value = value
+        self.id = id
 
 
 class FakeStreamingAgent:
