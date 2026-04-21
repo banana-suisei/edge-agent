@@ -6,7 +6,7 @@ import pytest
 from langchain_core.messages import AIMessageChunk, ToolMessage
 
 from plush_agent.config import AutoApproveRule, Config, HitlConfig
-from plush_agent.hitl.streaming_handler import SSEEventType, StreamingApprovalHandler
+from plush_agent.hitl.streaming_handler import StreamingApprovalHandler
 
 
 def _make_interrupt_value(action_requests, review_configs=None):
@@ -33,7 +33,6 @@ class FakeStreamingAgent:
     """Fake agent whose astream yields pre-configured v2 chunks per call."""
 
     def __init__(self, chunk_sequences=None, invoke_responses=None):
-        # chunk_sequences: list of lists — each astream() call consumes one list
         self.chunk_sequences = list(chunk_sequences or [[]])
         self.invoke_responses = invoke_responses or []
         self.invoke_calls = []
@@ -100,21 +99,39 @@ def _config_with_auto_approve():
     ]))
 
 
+def _is_text_event(e):
+    return e["kind"] == "text"
+
+
+def _is_structured_event(e, event_type=None):
+    if e["kind"] != "event":
+        return False
+    if event_type is None:
+        return True
+    return e["payload"]["type"] == event_type
+
+
+def _envelope_keys(e):
+    assert e["kind"] == "event"
+    p = e["payload"]
+    return set(p.keys())
+
+
 # ── Tests for basic token streaming ──
 
 @pytest.mark.asyncio
 class TestStreamingTokens:
     async def test_single_token(self):
-        agent = FakeStreamingAgent(chunk_sequences=[[ _token_chunk("hello") ]])
+        agent = FakeStreamingAgent(chunk_sequences=[[_token_chunk("hello")]])
         handler = StreamingApprovalHandler(agent, Config())
 
         events = []
         async for evt in handler.run_streaming("hi", "t1"):
             events.append(evt)
 
-        assert events[0]["event"] == SSEEventType.TOKEN
-        assert events[0]["data"]["content"] == "hello"
-        assert events[-1]["event"] == SSEEventType.DONE
+        text_events = [e for e in events if _is_text_event(e)]
+        assert len(text_events) == 1
+        assert text_events[0]["payload"] == "hello"
 
     async def test_multiple_tokens(self):
         agent = FakeStreamingAgent(chunk_sequences=[[
@@ -127,10 +144,10 @@ class TestStreamingTokens:
         async for evt in handler.run_streaming("hi", "t1"):
             events.append(evt)
 
-        token_events = [e for e in events if e["event"] == SSEEventType.TOKEN]
-        assert len(token_events) == 2
-        assert token_events[0]["data"]["content"] == "hello "
-        assert token_events[1]["data"]["content"] == "world"
+        text_events = [e for e in events if _is_text_event(e)]
+        assert len(text_events) == 2
+        assert text_events[0]["payload"] == "hello "
+        assert text_events[1]["payload"] == "world"
 
     async def test_empty_stream(self):
         agent = FakeStreamingAgent(chunk_sequences=[[]])
@@ -140,8 +157,7 @@ class TestStreamingTokens:
         async for evt in handler.run_streaming("hi", "t1"):
             events.append(evt)
 
-        assert len(events) == 1
-        assert events[0]["event"] == SSEEventType.DONE
+        assert len(events) == 0
 
 
 # ── Tests for tool calls ──
@@ -161,20 +177,38 @@ class TestStreamingToolCalls:
         async for evt in handler.run_streaming("list files", "t1"):
             events.append(evt)
 
-        types = [e["event"] for e in events]
-        assert SSEEventType.TOOL_CALL in types
-        assert SSEEventType.TOOL_RESULT in types
-        assert SSEEventType.TOKEN in types
+        tc_events = [e for e in events if _is_structured_event(e, "tool_call")]
+        tr_events = [e for e in events if _is_structured_event(e, "tool_result")]
+        text_events = [e for e in events if _is_text_event(e)]
 
-        # tool_call event should appear before tool_result
-        tc_idx = types.index(SSEEventType.TOOL_CALL)
-        tr_idx = types.index(SSEEventType.TOOL_RESULT)
+        assert len(tc_events) == 1
+        assert len(tr_events) == 1
+        assert len(text_events) == 1
+
+        tc_idx = events.index(tc_events[0])
+        tr_idx = events.index(tr_events[0])
         assert tc_idx < tr_idx
 
-        # Verify tool_call data
-        tc_event = events[tc_idx]
-        assert tc_event["data"]["name"] == "terminal"
-        assert tc_event["data"]["args"] == {"commands": "ls"}
+        tc_data = tc_events[0]["payload"]["data"]
+        assert tc_data["name"] == "terminal"
+        assert tc_data["args"] == {"commands": "ls"}
+        assert tc_data["call_id"] == "c1"
+
+        tr_data = tr_events[0]["payload"]["data"]
+        assert tr_data["call_id"] == "c1"
+        assert tr_data["is_error"] is False
+
+    async def test_envelope_fields(self):
+        agent = FakeStreamingAgent(chunk_sequences=[[_token_chunk("hi")]])
+        handler = StreamingApprovalHandler(agent, Config())
+
+        events = []
+        async for evt in handler.run_streaming("hi", "t1"):
+            events.append(evt)
+
+        # text events just have kind + payload string
+        assert events[0]["kind"] == "text"
+        assert isinstance(events[0]["payload"], str)
 
 
 # ── Tests for HITL interrupt handling ──
@@ -182,9 +216,7 @@ class TestStreamingToolCalls:
 @pytest.mark.asyncio
 class TestStreamingHITL:
     async def test_auto_approved_interrupt_resumes(self):
-        """All actions auto-approved → stream resumes internally, no interrupt event."""
         cfg = _config_with_auto_approve()
-        # First astream call: token + interrupt; second call: more tokens
         agent = FakeStreamingAgent(chunk_sequences=[
             [
                 _token_chunk("Let me check."),
@@ -202,15 +234,14 @@ class TestStreamingHITL:
         async for evt in handler.run_streaming("list", "t1"):
             events.append(evt)
 
-        types = [e["event"] for e in events]
-        assert SSEEventType.INTERRUPT not in types
-        # Should have tokens from both calls
-        token_events = [e for e in events if e["event"] == SSEEventType.TOKEN]
-        assert any(e["data"]["content"] == "Let me check." for e in token_events)
-        assert any(e["data"]["content"] == "Done." for e in token_events)
+        approval_events = [e for e in events if _is_structured_event(e, "approval_request")]
+        assert len(approval_events) == 0
+
+        text_events = [e for e in events if _is_text_event(e)]
+        assert any(e["payload"] == "Let me check." for e in text_events)
+        assert any(e["payload"] == "Done." for e in text_events)
 
     async def test_human_needed_interrupt_yields_event(self):
-        """Non-matching action → interrupt event emitted."""
         cfg = _config_with_auto_approve()
         agent = FakeStreamingAgent(chunk_sequences=[[
             _token_chunk("Let me check."),
@@ -222,13 +253,17 @@ class TestStreamingHITL:
         async for evt in handler.run_streaming("delete", "t1"):
             events.append(evt)
 
-        types = [e["event"] for e in events]
-        assert SSEEventType.INTERRUPT in types
+        approval_events = [e for e in events if _is_structured_event(e, "approval_request")]
+        assert len(approval_events) == 1
 
-        interrupt_evt = [e for e in events if e["event"] == SSEEventType.INTERRUPT][0]
-        assert interrupt_evt["data"]["approval_id"]
-        assert len(interrupt_evt["data"]["pending_actions"]) == 1
-        assert interrupt_evt["data"]["pending_actions"][0]["name"] == "terminal"
+        ap = approval_events[0]
+        assert _envelope_keys(ap) == {"id", "type", "timestamp", "data"}
+        ap_data = ap["payload"]["data"]
+        assert ap_data["approval_id"]
+        assert ap_data["thread_id"] == "t1"
+        assert len(ap_data["pending_actions"]) == 1
+        assert ap_data["pending_actions"][0]["name"] == "terminal"
+        assert ap_data["pending_actions"][0]["index"] == 0
 
     async def test_submit_decision_nonexistent(self):
         agent = FakeStreamingAgent(chunk_sequences=[[]])
@@ -238,8 +273,9 @@ class TestStreamingHITL:
         async for evt in handler.submit_decision_streaming("nonexistent", []):
             events.append(evt)
 
-        assert events[0]["event"] == SSEEventType.ERROR
-        assert "不存在" in events[0]["data"]["message"]
+        error_events = [e for e in events if _is_structured_event(e, "error")]
+        assert len(error_events) == 1
+        assert "不存在" in error_events[0]["payload"]["data"]["message"]
 
 
 # ── Tests for error handling ──
@@ -258,5 +294,8 @@ class TestStreamingErrors:
         async for evt in handler.run_streaming("hi", "t1"):
             events.append(evt)
 
-        assert events[0]["event"] == SSEEventType.ERROR
-        assert "boom" in events[0]["data"]["message"]
+        error_events = [e for e in events if _is_structured_event(e, "error")]
+        assert len(error_events) == 1
+        err_data = error_events[0]["payload"]["data"]
+        assert "boom" in err_data["message"]
+        assert err_data["code"] == "runtimeerror"

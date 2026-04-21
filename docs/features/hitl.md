@@ -164,21 +164,39 @@ def _handle_cli_hitl(agent, result, cfg, config: Config):
 
 | 方法 | 说明 |
 |------|------|
-| `run_streaming(message, thread_id)` | 流式执行 agent，yield SSE 事件 dict |
-| `submit_decision_streaming(approval_id, decisions)` | 流式恢复审批，yield SSE 事件 dict |
+| `run_streaming(message, thread_id)` | 流式执行 agent，yield 内部事件 dict |
+| `submit_decision_streaming(approval_id, decisions)` | 流式恢复审批，yield 内部事件 dict |
 | `_stream_agent(input, config, tool_call_acc)` | 内部流式循环，处理 messages/updates chunks |
-| `_handle_interrupt(interrupts, config, tool_call_acc)` | 处理 interrupt，自动审批则内部 resume，需人工则 yield interrupt 事件 |
+| `_handle_interrupt(interrupts, config, tool_call_acc)` | 处理 interrupt，自动审批则内部 resume，需人工则 yield approval_request 事件 |
 
-### SSE 事件类型（SSEEventType 枚举）
+### 内部事件格式
 
-| 事件 | 触发时机 | 数据结构 |
-|------|----------|----------|
-| `token` | LLM 生成文本片段（通过 `token.text` 获取） | `{"content": "..."}` |
-| `tool_call` | 工具调用完成（参数累积后） | `{"name": "...", "args": {...}, "id": "..."}` |
-| `tool_result` | 工具执行完成 | `{"name": "...", "content": "..."}` |
-| `interrupt` | HITL 需人工审批 | `{"approval_id": "...", "pending_actions": [...], "auto_approved_count": N}` |
-| `done` | 流式输出正常结束 | `{"content": ""}` |
-| `error` | 发生异常 | `{"message": "..."}` |
+handler 不再使用 `SSEEventType` 枚举，改为统一输出两种格式的 dict：
+
+**文本事件**：
+```python
+{"kind": "text", "payload": "token text"}
+```
+
+**结构化事件**（统一信封）：
+```python
+{"kind": "event", "payload": {"id": "evt_xxx", "type": "tool_call", "timestamp": 1713686400.0, "data": {...}}}
+```
+
+路由层通过 `_sse_serialize()` 转换为 SSE 线路格式：
+- `kind == "text"` → `event: text` + JSON 字符串
+- `kind == "event"` → `event: event` + JSON 信封对象
+
+### 事件类型目录
+
+| type | 触发时机 | data 结构 |
+|------|----------|-----------|
+| `tool_call` | 工具调用参数累积完成 | `{call_id, name, args}` |
+| `tool_result` | 工具执行完成 | `{call_id, name, content, is_error}` |
+| `approval_request` | HITL 需人工审批 | `{approval_id, thread_id, pending_actions[], auto_approved_count}` |
+| `error` | 发生异常 | `{code, message}` |
+
+`session_start`、`message_start`、`message_done` 事件由路由层直接 push 到 queue，不由 handler yield。详见 [sse-protocol.md](sse-protocol.md)。
 
 ### Interrupt 检测
 

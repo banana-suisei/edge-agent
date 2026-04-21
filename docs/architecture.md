@@ -9,7 +9,8 @@ Plush-Agent 是一个基于 LangChain 的 ReAct Agent，使用 OpenAI 接口标�
 │                     用户交互层                           │
 │  ┌──────────┐              ┌──────────────────────────┐ │
 │  │   CLI    │              │   FastAPI HTTP Server     │ │
-│  │  (click) │              │  /api/chat (SSE)          │ │
+│  │  (click) │              │  /api/chat/stream (SSE)   │ │
+│  │          │              │  /api/chat (POST)         │ │
 │  │          │              │  /api/chat/end            │ │
 │  │          │              │  /api/forms               │ │
 │  │          │              │  /api/approvals           │ │
@@ -96,7 +97,8 @@ plush-agent/
 │   └── server/
 │       ├── app.py                    # FastAPI 应用工厂
 │       ├── main.py                   # uvicorn 启动入口
-│       ├── routes_chat.py            # /api/chat, /api/chat/end
+│       ├── session.py                # SessionManager（长连接 SSE 会话管理）
+│       ├── routes_chat.py            # /api/chat, /api/chat/stream, /api/chat/end
 │       ├── routes_form.py            # /api/forms
 │       └── routes_approval.py        # /api/approvals
 └── tests/
@@ -121,24 +123,42 @@ plush-agent/
          -> 需要人工 -> 返回 pending_approval 等待 HTTP 决策
 ```
 
-### 1b. 聊天请求流（SSE 流式模式）
+### 1b. 聊天请求流（SSE 长连接模式）
+
+SSE 按 thread_id 建立长连接，通过 SessionManager + asyncio.Queue 桥接 HTTP 输入和 SSE 输出。
+详见 [sse-protocol.md](features/sse-protocol.md)。
 
 ```
-用户消息 -> FastAPI /api/chat (X-Stream: true)
-         -> EventSourceResponse(streaming_handler.run_streaming())
-           -> agent.astream(messages, stream_mode=["messages","updates"], version="v2")
-             -> messages chunk -> token.text -> yield SSE token 事件
-             -> messages chunk -> token.tool_call_chunks -> 累积工具调用参数
-             -> updates chunk (tools) -> yield SSE tool_result 事件
-             -> updates chunk (__interrupt__) -> _handle_interrupt():
-               -> 全部自动通过 -> Command(resume={interrupt.id: {"decisions": ...}}) 内部 resume streaming
-               -> 需要人工 -> yield SSE interrupt 事件 -> 流结束
+1. 客户端建立 SSE 连接:
+   GET /api/chat/stream?thread_id=t1
+   -> SessionManager.get_or_create("t1") -> asyncio.Queue
+   -> SSE 返回 session_start 事件
+   -> 长连接，从 queue 读取事件并推送
 
-审批恢复 (X-Stream: true):
-POST /api/approvals/{id}/decide
-         -> EventSourceResponse(streaming_handler.submit_decision_streaming())
-           -> agent.astream(Command(resume={interrupt_id: {"decisions": ...}}), ...)
-           -> 继续流式输出后续 token / tool_call / tool_result 事件
+2. 客户端发送消息:
+   POST /api/chat {message, thread_id}
+   -> 检测到 SSE 连接 -> 返回 {"status": "accepted"}
+   -> 后台任务: streaming_handler.run_streaming(message, thread_id)
+     -> agent.astream(messages, stream_mode=["messages","updates"], version="v2")
+       -> messages chunk -> token.text -> yield {"kind": "text", "payload": "..."}
+       -> messages chunk -> token.tool_call_chunks -> 累积工具调用参数
+       -> updates chunk (tools) -> yield {"kind": "event", "type": "tool_result", ...}
+       -> updates chunk (__interrupt__) -> _handle_interrupt():
+         -> 全部自动通过 -> Command(resume={...}) 内部 resume
+         -> 需要人工 -> yield {"kind": "event", "type": "approval_request", ...}
+     -> handler yield 事件 -> _consume_and_push() -> queue.put()
+     -> SSE 从 queue 读取并推送 (event: text 或 event: event)
+
+3. 客户端提交审批:
+   POST /api/approvals/{id}/decide {decisions}
+   -> 检测到 SSE 连接 -> 返回 {"status": "accepted"}
+   -> 后台任务: streaming_handler.submit_decision_streaming(id, decisions)
+   -> LangGraph resume -> agent 继续输出 -> 通过原 SSE 推送
+
+4. 客户端断开 SSE:
+   -> 取消后台 agent 任务
+   -> save_session_summary() 保存摘要
+   -> SessionManager.close() 清理资源
 ```
 
 ### 2. 长期记忆流
@@ -225,6 +245,9 @@ server/main.py -> agent.py
                -> hitl/streaming_handler.py
                -> server/app.py
 
+server/app.py -> server/session.py (SessionManager)
+              -> server/routes_*.py
+
 agent.py -> config.py
          -> skills/loader.py + skills/middleware.py
          -> tools/bash.py + tools/form.py + tools/memory.py
@@ -234,10 +257,11 @@ agent.py -> config.py
 hitl/approval_handler.py -> config.py
                           (依赖 agent 实例，不依赖具体 agent 构建逻辑)
 
-server/routes_chat.py -> hitl/approval_handler.py
+server/routes_chat.py -> server/session.py (SessionManager)
                       -> hitl/streaming_handler.py
                       -> tools/memory.py (save_session_summary, load_session_summary)
-server/routes_approval.py -> hitl/streaming_handler.py
+server/routes_approval.py -> server/routes_chat.py (_sse_serialize, _consume_and_push)
+                          -> hitl/streaming_handler.py
 server/routes_*.py -> tools/form.py
 ```
 
@@ -248,7 +272,8 @@ server/routes_*.py -> tools/form.py
 | Agent 框架 | LangChain `create_agent` | 官方 ReAct 实现，内置 middleware/tool 支持 |
 | HITL 实现 | 官方 `HumanInTheLoopMiddleware` | 不手动实现 interrupt，交给 SDK 管理状态 |
 | 自动审批 | CLI 和 HTTP 双路径实现，共享正则匹配逻辑 | `_should_auto_approve()` 在 CLI 层，`ApprovalHandler` 在 HTTP 层；正则使用词边界 `\b` 避免子串误匹配 |
-| 流式响应 | 扩展 `ApprovalHandler` 为 `StreamingApprovalHandler` 子类 | 不修改基类，HTTP 流式通过 SSE (`sse-starlette`)，CLI 流式通过 `--stream` 参数启用 `astream()` |
+| 流式响应 | 长连接 SSE + `SessionManager` + `asyncio.Queue` | SSE 按 thread_id 绑定会话，通过 Queue 桥接 POST 输入和 SSE 输出；审批期间连接保持，利用 LangChain interrupt/resume 管理状态 |
+| SSE 事件格式 | 两种 SSE event type：`text` + `event`（统一信封） | 文本和事件分离，信封内 `type` 字段分发，新增事件类型无需改协议层 |
 | Skills 格式 | agentskills.io 规范 | 开放标准，SKILL.md 可读、可审计、易分享 |
 | 表单等待 | `asyncio.Event` + 内存 store | 简单可靠，单进程部署足够 |
 | 长期记忆存储 | PostgreSQL + pgvector (PostgresStore + OpenAIEmbeddings) | 生产级持久化，跨进程共享，原生向量语义搜索支持 |
