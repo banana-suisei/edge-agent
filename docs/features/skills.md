@@ -72,7 +72,6 @@ class SkillLoader:
 
 ```python
 class SkillMiddleware(AgentMiddleware):
-    tools = [load_skill]  # 注册到 agent
 
     def _inject_skills_prompt(self, request: ModelRequest) -> ModelRequest:
         # 在 system prompt 末尾追加 skill 描述列表（共享逻辑）
@@ -85,6 +84,8 @@ class SkillMiddleware(AgentMiddleware):
         # 异步路径：handler 是 async 函数
         return await handler(self._inject_skills_prompt(request))
 ```
+
+`SkillMiddleware` 仅负责注入 skill 描述到 system prompt，不声明 `tools`。`load_skill` 工具通过 `_collect_tools()` 作为常规工具注册到 `create_agent`，确保走标准 tool node 被 `HumanInTheLoopMiddleware` 拦截审批。
 
 `wrap_model_call` 和 `awrap_model_call` 在每次 LLM 调用前执行，将所有 skill 的 name+description 追加到 system message 的 content blocks 中。两者共享 `_inject_skills_prompt()` 逻辑。异步版本 (`awrap_model_call`) 是必须的——使用 `astream()` 或 `ainvoke()` 时 LangGraph 调用 async 版本，未实现会抛出 `NotImplementedError`。追加的文本会通过 `_sanitize_surrogates()` 清理，防止代理字符污染 API 请求。
 
@@ -99,7 +100,7 @@ def load_skill(skill_name: str) -> str:
 - 成功：返回 `"Loaded skill: {name}\n\n{full SKILL.md content}"`（经 `_sanitize_surrogates()` 清理）
 - 未找到：返回 `"Skill '{name}' not found. Available skills: a, b, c"`
 
-**注意**：`_loader` 是模块级全局变量，通过 `_set_loader()` 在 `SkillMiddleware.__init__` 时设置。这是因为 `@tool` 装饰的函数无法通过构造函数注入依赖。
+`load_skill` 在 `agent.py` 的 `_collect_tools()` 中作为常规工具注册，会正常被 `HumanInTheLoopMiddleware` 拦截。`_loader` 是模块级全局变量，通过 `_set_loader()` 在 `SkillMiddleware.__init__` 时设置。这是因为 `@tool` 装饰的函数无法通过构造函数注入依赖。
 
 ## 添加新 Skill
 

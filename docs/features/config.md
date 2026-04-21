@@ -75,9 +75,9 @@ memory:
 hitl:
   auto_approve:
     - tool: "terminal"                   # 工具名
-      args_patterns:                     # 参数正则列表
-        - "^.*ls.*$"                     # 匹配 args 字符串表示
-        - "^.*cat.*$"
+      args_patterns:                     # 参数正则列表（使用 \b 词边界）
+        - "\\bls\\b"                     # 匹配独立命令，不会误匹配 "skills" 等
+        - "\\bcat\\b"
     - tool: "form_generate"
       args_patterns:
         - ".*"                           # 全部自动通过
@@ -87,6 +87,8 @@ hitl:
 ```
 
 每条规则包含 `tool`（工具名）和 `args_patterns`（正则列表）。当工具调用的 `str(args)` 匹配任一正则时，自动通过审批。
+
+**正则模式必须使用词边界 `\b`**。避免使用 `^.*x.*$` 通配模式，否则会误匹配包含目标子串的词（如 `^.*ls.*$` 会匹配 `npx skills find ...` 中的 "skills"）。
 
 **注意**：`HumanInTheLoopMiddleware` 在 `agent.py` 中配置 `interrupt_on` 对所有已知工具名设置为 `True`（默认拦截所有）。此处的 `auto_approve` 规则控制的是拦截后的自动放行行为——未匹配规则的工具调用会暂停等待人工审批。新增工具必须同时出现在 `interrupt_on`（`agent.py` 中自动从 tools 列表收集）和可选的 `auto_approve` 规则中。
 

@@ -29,6 +29,7 @@ Plush-Agent 是一个基于 LangChain 的 ReAct Agent，使用 OpenAI 接口标�
 │  │              Middleware Pipeline                  │   │
 │  │  SkillMiddleware -> HumanInTheLoopMiddleware      │   │
 │  │  (所有工具默认拦截，interrupt_on={tool:True})      │   │
+│  │  SkillMiddleware 仅注入 prompt，不注册 tools       │   │
 │  └──────────────────────────────────────────────────┘   │
 │                                                         │
 └──────────────────────────┬──────────────────────────────┘
@@ -80,7 +81,7 @@ plush-agent/
 │   ├── cli.py                        # CLI 入口 (click: chat, serve)
 │   ├── skills/
 │   │   ├── loader.py                 # SKILL.md 扫描与解析
-│   │   └── middleware.py             # SkillMiddleware + load_skill tool
+│   │   └── middleware.py             # SkillMiddleware (prompt injection) + load_skill tool
 │   ├── tools/
 │   │   ├── bash.py                   # ShellTool 封装
 │   │   ├── form.py                   # 表单生成 tool + HTTP 接口
@@ -138,6 +139,8 @@ POST /api/approvals/{id}/decide
          -> EventSourceResponse(streaming_handler.submit_decision_streaming())
            -> agent.astream(Command(resume={interrupt_id: {"decisions": ...}}), ...)
            -> 继续流式输出后续 token / tool_call / tool_result 事件
+```
+
 ### 2. 长期记忆流
 
 ```
@@ -244,7 +247,7 @@ server/routes_*.py -> tools/form.py
 |------|------|------|
 | Agent 框架 | LangChain `create_agent` | 官方 ReAct 实现，内置 middleware/tool 支持 |
 | HITL 实现 | 官方 `HumanInTheLoopMiddleware` | 不手动实现 interrupt，交给 SDK 管理状态 |
-| 自动审批 | CLI 和 HTTP 双路径实现 | `_should_auto_approve()` 在 CLI 层，`ApprovalHandler` 在 HTTP 层，共享同一正则匹配逻辑 |
+| 自动审批 | CLI 和 HTTP 双路径实现，共享正则匹配逻辑 | `_should_auto_approve()` 在 CLI 层，`ApprovalHandler` 在 HTTP 层；正则使用词边界 `\b` 避免子串误匹配 |
 | 流式响应 | 扩展 `ApprovalHandler` 为 `StreamingApprovalHandler` 子类 | 不修改基类，HTTP 流式通过 SSE (`sse-starlette`)，CLI 流式通过 `--stream` 参数启用 `astream()` |
 | Skills 格式 | agentskills.io 规范 | 开放标准，SKILL.md 可读、可审计、易分享 |
 | 表单等待 | `asyncio.Event` + 内存 store | 简单可靠，单进程部署足够 |
@@ -252,6 +255,6 @@ server/routes_*.py -> tools/form.py
 | 记忆访问方式 | 通过 `runtime.store` 在 tool 中读写 | LangChain 官方模式：store 传入 create_agent 后，tool 通过 ToolRuntime.store 访问 |
 | 记忆搜索方式 | 向量语义搜索 (pgvector + Embeddings, cosine similarity) | 自然语言查询，语义匹配比关键词匹配更准确，跨语言无障碍 |
 | 记忆命名空间 | 固定 `("users", "default")` | 简化接口，所有记忆工具无需 namespace 参数 |
-| 会话摘要 | 固定 key `"latest"` 写入 `("sessions",)` 命名空间 | 简单可靠，每次启动自动加载上次摘要 |
+| 会话摘要 | 固定 key `"latest"` 写入 `("sessions",)` 命名空间 | CLI 和 HTTP 均通过 checkpointer 获取消息，不依赖运行时变量追踪 |
 | 记忆工具审批 | 自动通过（`auto_approve: .*`） | 记忆操作无安全风险，无需人工确认 |
 | MCP 加载 | JSON 文件 | MCP 的 MultiServerMCPClient 接受 dict，JSON 映射最直接 |

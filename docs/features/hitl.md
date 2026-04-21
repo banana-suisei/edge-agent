@@ -51,8 +51,7 @@ HITL 分两层：
 在 `agent.py` 的 `build_agent()` 中，所有已知工具名被收集后注册到 `interrupt_on`：
 
 ```python
-all_tool_names = {t.name for t in tools}
-all_tool_names.add("load_skill")  # 来自 SkillMiddleware
+all_tool_names = {t.name for t in tools}  # _collect_tools() 已包含 load_skill
 interrupt_on = {name: True for name in all_tool_names}
 
 hitl_middleware = HumanInTheLoopMiddleware(
@@ -255,6 +254,8 @@ def should_auto_approve(self, tool_name: str, tool_args: dict) -> bool:
 - 参数匹配是对 `str(tool_args)` 做正则搜索
 - 任一 pattern 匹配即通过
 
+**正则模式应使用词边界（`\b`）而非 `^.*x.*$` 通配**。例如 `\bls\b` 只匹配独立的 `ls` 命令，不会误匹配 `skills`、`false` 等包含 `ls` 子串的词。历史问题：`^.*ls.*$` 曾导致 `npx skills find ...` 中的 "skills" 被误匹配，使得 `terminal` 工具被错误自动批准。
+
 当前自动审批的工具：`terminal`（部分命令）、`form_generate`、`load_skill`、`save_memory`、`search_memory`、`get_memory`、`delete_memory`。
 
 ## HTTP 接口
@@ -310,12 +311,12 @@ hitl:
   auto_approve:
     - tool: "my_new_tool"
       args_patterns:
-        - "^.*safe_operation.*$"
+        - "\\bsafe_operation\\b"
 ```
 
 ### 添加新工具到 HITL
 
-在 `agent.py` 的 `build_agent()` 中，新工具会自动被加入 `interrupt_on`（因为从 `tools` 列表动态收集）。但如果工具来自 middleware（如 `load_skill`），需要手动 `all_tool_names.add("tool_name")`。
+在 `agent.py` 的 `build_agent()` 中，新工具会自动被加入 `interrupt_on`（因为从 `tools` 列表动态收集）。所有工具（包括 `load_skill`）都通过 `_collect_tools()` 注册为常规工具，确保走标准 tool node 被 `HumanInTheLoopMiddleware` 拦截。
 
 ### 集成到新路由
 
@@ -348,6 +349,24 @@ return result  # 始终是结构化 dict，直接返回
 
 ## 调试定位
 
+### 调试日志
+
+`plush_agent.hitl` logger（`cli.py`、`approval_handler.py`、`streaming_handler.py` 共享）在 DEBUG 级别记录自动审批决策：
+
+```
+DEBUG plush_agent.hitl: HITL check: tool=terminal, args={'commands': 'ls -la'}, auto_approve=True
+DEBUG plush_agent.hitl: auto-approve matched: tool=terminal, pattern=\bls\b, args_str={'commands': 'ls -la'}
+DEBUG plush_agent.hitl: HITL check: tool=terminal, args={'commands': 'rm -rf /'}, auto_approve=False
+```
+
+启用方式：
+```python
+import logging
+logging.getLogger("plush_agent.hitl").setLevel(logging.DEBUG)
+```
+
+### 问题定位表
+
 | 问题 | 定位 |
 |------|------|
 | 工具总被审批 | 检查 `interrupt_on` 配置和 `auto_approve` 规则 |
@@ -359,6 +378,7 @@ return result  # 始终是结构化 dict，直接返回
 | KeyError: 'arguments' | ActionRequest 使用 `args` 不是 `arguments` |
 | 工具直接执行无审批 | 检查 `HumanInTheLoopMiddleware` 是否在 middleware 列表中 |
 | 新工具绕过审批 | 检查 `interrupt_on` 是否包含该工具名 |
+| 工具被误自动批准 | 启用 `plush_agent.hitl` logger（DEBUG 级别），查看 auto-approve 匹配的 tool name、pattern 和 args_str。常见原因：正则模式过于宽泛（如 `^.*ls.*$` 匹配 "skills"），应改用词边界 `\bls\b` |
 | 流式模式工具无审批/interrupt | `_stream_cli()` 或 `_stream_agent()` 中 `__interrupt__` 检测 — 必须在遍历 `update_data.items()` 前检查顶层键 |
 | 流式模式工具调用后无回复 | 自动审批后未 resume streaming — 检查 `_stream_agent()` 或 `_stream_cli()` 的 while 循环是否正确设置 `stream_input = Command(resume={interrupt.id: ...})` |
 | SSE 流无事件返回 | 检查请求头 `X-Stream: true` 或 `Accept: text/event-stream`，检查 `app.state.streaming_approval_handler` 是否设置 |

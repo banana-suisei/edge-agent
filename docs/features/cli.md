@@ -38,23 +38,26 @@ plush-agent --config my-config.yaml chat
 
 ```python
 prev_summary = load_session_summary(store)
-if prev_summary and not all_messages:
+if prev_summary and checkpointer.get_tuple(cfg) is None:
     enriched = f"[上一次对话摘要]\n{prev_summary}\n[当前消息]\n{user_input}"
 ```
 
-后续消息不再注入摘要，仅包含用户原始输入。
+通过 `checkpointer.get_tuple(cfg) is None` 判断是否为新会话的首条消息。后续消息不再注入摘要，仅包含用户原始输入。
 
 ### 会话记忆保存
 
-退出时（`/quit`、Ctrl+C、EOF）自动保存：
+退出时（`/quit`、Ctrl+C、EOF）自动保存。无论阻塞模式还是流式模式，均通过 `checkpointer` 获取消息：
 
 ```python
 finally:
-    if all_messages:
-        save_session_summary(store, all_messages, config)
+    snapshot = checkpointer.get_tuple(cfg)
+    if snapshot:
+        msgs = snapshot.checkpoint.get("channel_values", {}).get("messages", [])
+        if msgs:
+            save_session_summary(store, msgs, config)
 ```
 
-摘要写入固定位置 `("sessions",) / "latest"`。
+摘要写入固定位置 `("sessions",) / "latest"`。此方式与 HTTP `/api/chat/end` 端点一致，不依赖运行时变量追踪。
 
 ### HITL 交互审批
 
