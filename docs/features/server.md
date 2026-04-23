@@ -78,7 +78,7 @@ Accept: text/event-stream
 - 连接建立时发送 `session_start` 事件
 - 每 30 秒发送 `keepalive` 心跳
 - 同一 `thread_id` 只允许一个连接，新连接自动踢掉旧连接
-- 断开时自动保存会话摘要到长期记忆
+- 断开时：若会话中发送过消息则自动保存摘要到长期记忆，未发送过消息则跳过摘要保存
 - 审批期间连接保持不断开
 
 **SSE 数据格式**：详见 [sse-protocol.md](sse-protocol.md)
@@ -207,7 +207,7 @@ plush-agent --config prod.yaml serve     # 指定配置文件
 | SSE 无事件返回 | 检查 `session_manager` 是否注册，检查 queue 是否创建 |
 | SSE 审批后无输出 | 检查 `streaming_pending` 中是否有对应 approval_id |
 | GET /api/approvals 返回空 | 确认路由同时查了 `approval_handler.pending` 和 `streaming_approval_handler.streaming_pending` |
-| SSE 断开后摘要未保存 | 检查 `_on_stream_disconnect` 日志 |
+| SSE 断开后摘要未保存 | 检查 `_on_stream_disconnect` 日志，确认会话是否发送过消息（未发送消息的空会话会跳过摘要） |
 | 新连接未踢掉旧连接 | `SessionManager.close()` 是否正确清理 |
 
 ## UDS 审批/表单通道

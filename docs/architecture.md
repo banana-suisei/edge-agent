@@ -155,6 +155,7 @@ SSE 按 thread_id 建立长连接，通过 SessionManager + asyncio.Queue 桥接
          -> 全部自动通过 -> Command(resume={...}) 内部 resume
          -> 需要人工 -> yield {"kind": "event", "type": "approval_request", ...}
      -> handler yield 事件 -> _consume_and_push() -> queue.put()
+       -> _consume_and_push 累积所有 text payload，流结束后发送 message_finish 事件
      -> SSE 从 queue 读取并推送 (event: text 或 event: event)
 
 3. 客户端提交审批:
@@ -165,7 +166,8 @@ SSE 按 thread_id 建立长连接，通过 SessionManager + asyncio.Queue 桥接
 
 4. 客户端断开 SSE:
    -> 取消后台 agent 任务
-   -> save_session_summary() 保存摘要
+   -> 若本会话发送过消息 -> save_session_summary() 保存摘要
+   -> 若本会话未发送过消息 -> 跳过摘要保存
    -> SessionManager.close() 清理资源
 ```
 

@@ -185,6 +185,31 @@ Agent 完成一轮消息的完整处理后发送。此时客户端可以发送�
 
 **注意**：如果出现 `approval_request`，`message_done` 会在审批通过并完成后续处理后发送。
 
+### message_finish
+
+流式文本传输结束后发送，包含完整的消息内容。客户端可用于获取完整回复而无需自行拼接 text 事件。
+
+```json
+{
+  "id": "evt_mf1",
+  "type": "message_finish",
+  "timestamp": 1713686403.0,
+  "data": {
+    "message_id": "msg_abc123",
+    "content": "Hello! Let me check that for you."
+  }
+}
+```
+
+**字段说明**：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `message_id` | string | 与 `message_start` 中的 `message_id` 一致 |
+| `content` | string | 该轮消息的完整文本内容（所有 text 事件的拼接） |
+
+**注意**：仅在初始消息发送时产生（POST /api/chat 触发），审批恢复后的流式输出不发送此事件。
+
 ### error
 
 发生异常时发送。
@@ -314,6 +339,8 @@ GET /api/approvals/<approval_id>
     │<──────────────────────────────────────│
     │  SSE: text "Done!"                    │
     │<──────────────────────────────────────│
+    │  SSE: event message_finish            │
+    │<──────────────────────────────────────│
     │  SSE: event message_done              │
     │<──────────────────────────────────────│
     │                                       │
@@ -345,7 +372,7 @@ GET /api/approvals/<approval_id>
 
 ### 连接中断
 
-- 客户端主动断开：服务端自动保存会话摘要，清理资源
+- 客户端主动断开：若会话中发送过消息，服务端自动保存会话摘要；未发送过消息则跳过摘要保存，仅清理资源
 - 网络中断：客户端应实现自动重连，使用相同 `thread_id` 重新建立 SSE 连接
 - 新连接踢旧连接：如果同一 `thread_id` 建立新 SSE，旧连接被关闭
 
@@ -392,6 +419,10 @@ eventSource.addEventListener('event', (e) => {
 
     case 'approval_request':
       handleApproval(event.data);
+      break;
+
+    case 'message_finish':
+      console.log('Full message:', event.data.content);
       break;
 
     case 'message_done':
@@ -477,6 +508,8 @@ def listen_sse():
                         print()  # new line for new message
                     elif etype == "approval_request":
                         handle_approval(edata)
+                    elif etype == "message_finish":
+                        print(f"\n[Finish] {edata['message_id']}: {edata['content'][:100]}")
                     elif etype == "message_done":
                         print("\n[Done]")
                     elif etype == "error":

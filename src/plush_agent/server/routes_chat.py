@@ -37,10 +37,26 @@ def _get_session_manager(request: Request) -> SessionManager:
     return request.app.state.session_manager
 
 
-async def _consume_and_push(async_gen, queue: asyncio.Queue) -> None:
+async def _consume_and_push(
+    async_gen, queue: asyncio.Queue, message_id: str | None = None
+) -> None:
+    full_text = ""
     try:
         async for event in async_gen:
+            if message_id is not None and event.get("kind") == "text":
+                full_text += event.get("payload", "")
             await queue.put(_sse_serialize(event))
+
+        if message_id is not None:
+            from plush_agent.hitl.streaming_handler import _envelope
+
+            await queue.put(_sse_serialize({
+                "kind": "event",
+                "payload": _envelope("message_finish", {
+                    "message_id": message_id,
+                    "content": full_text,
+                }),
+            }))
     except asyncio.CancelledError:
         pass
     except Exception as e:
@@ -98,7 +114,12 @@ async def stream(request: Request, thread_id: str = "default"):
 
 async def _on_stream_disconnect(request: Request, thread_id: str) -> None:
     sm = _get_session_manager(request)
+    had_messages = sm.has_sent_message(thread_id)
     await sm.close(thread_id)
+
+    if not had_messages:
+        logger.info("No message sent in session, skip summary: %s", thread_id)
+        return
 
     try:
         from plush_agent.tools.memory import save_session_summary
@@ -132,9 +153,10 @@ async def chat(req: ChatRequest, request: Request):
 
         from plush_agent.hitl.streaming_handler import _envelope
 
+        message_id = f"msg_{uuid4().hex[:12]}"
         await queue.put(_sse_serialize({
             "kind": "event",
-            "payload": _envelope("message_start", {"message_id": f"msg_{uuid4().hex[:12]}"}),
+            "payload": _envelope("message_start", {"message_id": message_id}),
         }))
 
         cfg = {"configurable": {"thread_id": thread_id}}
@@ -145,8 +167,9 @@ async def chat(req: ChatRequest, request: Request):
                 message = f"[上一次对话摘要]\n{prev_summary}\n[当前消息]\n{message}"
 
         gen = streaming_handler.run_streaming(message, thread_id)
-        task = asyncio.create_task(_consume_and_push(gen, queue))
+        task = asyncio.create_task(_consume_and_push(gen, queue, message_id))
         sm.register_task(thread_id, task)
+        sm.mark_message_sent(thread_id)
 
         return {"status": "accepted", "thread_id": thread_id}
 
