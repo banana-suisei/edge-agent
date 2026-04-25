@@ -38,25 +38,47 @@ def _get_session_manager(request: Request) -> SessionManager:
 
 
 async def _consume_and_push(
-    async_gen, queue: asyncio.Queue, message_id: str | None = None
+    async_gen, queue: asyncio.Queue, message_id: str | None = None,
+    session_manager: SessionManager | None = None, thread_id: str | None = None,
 ) -> None:
     full_text = ""
+    last_event_type: str | None = None
     try:
         async for event in async_gen:
-            if message_id is not None and event.get("kind") == "text":
+            if event.get("kind") == "text":
                 full_text += event.get("payload", "")
+
+            payload = event.get("payload")
+            if event.get("kind") == "event" and isinstance(payload, dict):
+                last_event_type = payload.get("type")
+
             await queue.put(_sse_serialize(event))
 
-        if message_id is not None:
-            from plush_agent.hitl.streaming_handler import _envelope
+        if message_id is None:
+            return
 
-            await queue.put(_sse_serialize({
-                "kind": "event",
-                "payload": _envelope("message_finish", {
-                    "message_id": message_id,
-                    "content": full_text,
-                }),
-            }))
+        if last_event_type == "approval_request":
+            # Flow paused for approval, accumulate text for later
+            if session_manager and thread_id:
+                session_manager.accumulate_text(thread_id, full_text)
+            return
+
+        # Flow completed, send message_finish with all accumulated text
+        from plush_agent.hitl.streaming_handler import _envelope
+
+        total_text = full_text
+        if session_manager and thread_id:
+            session_manager.accumulate_text(thread_id, full_text)
+            total_text = session_manager.pop_accumulated_text(thread_id)
+            session_manager.pop_message_id(thread_id)
+
+        await queue.put(_sse_serialize({
+            "kind": "event",
+            "payload": _envelope("message_finish", {
+                "message_id": message_id,
+                "content": total_text,
+            }),
+        }))
     except asyncio.CancelledError:
         pass
     except Exception as e:
@@ -167,7 +189,8 @@ async def chat(req: ChatRequest, request: Request):
                 message = f"[上一次对话摘要]\n{prev_summary}\n[当前消息]\n{message}"
 
         gen = streaming_handler.run_streaming(message, thread_id)
-        task = asyncio.create_task(_consume_and_push(gen, queue, message_id))
+        sm.set_message_id(thread_id, message_id)
+        task = asyncio.create_task(_consume_and_push(gen, queue, message_id, sm, thread_id))
         sm.register_task(thread_id, task)
         sm.mark_message_sent(thread_id)
 

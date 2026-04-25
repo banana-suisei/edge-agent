@@ -80,7 +80,10 @@ async def decide(approval_id: str, req: DecideRequest, request: Request):
     if pending and sm.has_session(pending.thread_id):
         queue = sm.get_or_create(pending.thread_id)
         gen = streaming_handler.submit_decision_streaming(approval_id, req.decisions)
-        task = asyncio.create_task(_consume_and_push(gen, queue))
+        message_id = sm.get_message_id(pending.thread_id)
+        task = asyncio.create_task(_consume_and_push(
+            gen, queue, message_id, sm, pending.thread_id,
+        ))
         sm.register_task(pending.thread_id, task)
         return {"status": "accepted"}
 
