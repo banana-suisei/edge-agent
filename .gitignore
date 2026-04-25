@@ -5,3 +5,12 @@
 /.venv/
 
 /system-prompts/
+/config.yaml
+/.bash_profile
+/.bashrc
+/.gitignore
+/.gitmodules
+/.profile
+/.ripgreprc
+/.zprofile
+/.zshrc

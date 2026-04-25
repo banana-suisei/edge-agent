@@ -1,0 +1,78 @@
+# Model configuration
+model:
+  base_url: "https://api.openai.com/v1"
+  api_key_env: "OPENAI_API_KEY"  # Environment variable name or direct API key
+  model_name: "gpt-4.1"
+  temperature: 0.7
+  max_tokens: 4096
+
+# Agent configuration
+agent:
+  system_prompt: |
+    You are an intelligent assistant.
+  skills_dir: ".skill"
+  max_iterations: 10
+
+# MCP (Model Context Protocol) configuration
+mcp:
+  config_file: "mcp_servers.json"
+
+# Memory configuration
+memory:
+  type: "postgres"
+  postgres:
+    host: "localhost"
+    port: 5432
+    user: "postgres"
+    password: "postgres"
+    database: "plush_agent"
+    sslmode: "prefer"
+  embedding:
+    base_url: "https://api.openai.com/v1"
+    api_key_env: "OPENAI_API_KEY"
+    model_name: "text-embedding-3-small"
+    dims: 1536
+    distance_type: "cosine"  # l2 / inner_product / cosine
+
+# Server configuration
+server:
+  host: "0.0.0.0"
+  port: 8000
+
+# HITL (Human-in-the-Loop) auto-approve rules
+hitl:
+  auto_approve:
+    - tool: "terminal"
+      args_patterns:
+        - "\\bls\\b"
+        - "\\bcat\\b"
+        - "\\becho\\b"
+        - "\\bhead\\b"
+        - "\\btail\\b"
+        - "\\bgrep\\b"
+    - tool: "form_generate"
+      args_patterns:
+        - ".*"
+    - tool: "load_skill"
+      args_patterns:
+        - ".*"
+    - tool: "fetch_image"
+      args_patterns:
+        - ".*"
+
+# Form configuration
+form:
+  default_timeout: 300
+
+# Robot identifier
+robot_id: "robot-0"
+
+# Image fetching configuration
+image:
+  url: "http://localhost:8080/image"
+  timeout: 30
+
+# UDS (Unix Domain Socket) configuration
+uds:
+  enabled: false
+  socket_path: "/tmp/agent-gateway.sock"
